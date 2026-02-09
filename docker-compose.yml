@@ -1,4 +1,4 @@
-﻿services:
+services:
   api:
     build: .
     env_file: .env
@@ -11,6 +11,8 @@
 
   nginx:
     image: nginx:1.25-alpine
+    profiles:
+      - webhook
     depends_on:
       - api
     ports:

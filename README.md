@@ -7,7 +7,7 @@
 - При "Не готов записаться" собирает комментарий и пишет в Google Sheets.
 - Ежедневно в 09:00 по Новосибирску:
   - отправляет напоминания о завтрашних записях,
-  - отправляет 6‑месячные напоминания по дате последнего визита.
+  - отправляет 6-месячные напоминания по дате последнего визита.
 - Если сообщение не доставлено (Chat not found), пишет строку в лист "Не доставлено".
 
 Важно: бот может писать пользователю только после того, как пользователь нажал **Start** у бота.
@@ -19,8 +19,8 @@
 - B: `tg_username` (например `@shmaaak`)
 
 Как работает логика:
-- Если дата в будущем и равна завтрашнему дню — отправляется сообщение о записи.
-- Если дата в прошлом и ровно 6 месяцев назад от сегодня — отправляется 6‑месячное напоминание.
+- Если дата в будущем и равна завтрашнему дню - отправляется сообщение о записи.
+- Если дата в прошлом и ровно 6 месяцев назад от сегодня - отправляется 6-месячное напоминание.
 
 Лист **"Не готов записаться (комментарии)"**:
 - A: дата и время
@@ -43,12 +43,68 @@
 docker compose up --build
 ```
 
+Если нужен встроенный `nginx`, запускайте с профилем:
+
+```bash
+docker compose --profile webhook up --build
+```
+
+## Деплой на чистый Ubuntu сервер
+
+1. Подготовьте сервер:
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl git
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER
+newgrp docker
+sudo systemctl enable docker
+```
+
+2. Клонируйте проект:
+
+```bash
+sudo mkdir -p /opt/golden-dent
+sudo chown -R $USER:$USER /opt/golden-dent
+git clone https://github.com/MaksimShmakov/golden-dent-bot.git /opt/golden-dent
+cd /opt/golden-dent
+```
+
+3. Настройте переменные и сервисный ключ:
+
+```bash
+cp .env.example .env
+nano .env
+nano service-account.json
+```
+
+4. Запустите бота (polling):
+
+```bash
+docker compose up -d --build
+docker compose logs -f api
+```
+
 ## Вебхук и polling
 
 - Если нет домена/https, используйте polling: `SET_WEBHOOK=false` (режим по умолчанию).
 - Если есть публичный https домен, включите вебхук: `SET_WEBHOOK=true` и `WEBHOOK_URL`.
 - В `WEBHOOK_SECRET_TOKEN` можно задать секрет для Telegram.
 - Вебхук принимает запросы на `/webhook`.
+- Для запуска с `nginx` используйте профиль `webhook`:
+
+```bash
+docker compose --profile webhook up -d --build
+```
+
+## Обновление на сервере
+
+```bash
+cd /opt/golden-dent
+git pull
+docker compose up -d --build
+```
 
 ## CI
 
