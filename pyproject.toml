@@ -1,0 +1,24 @@
+﻿[project]
+name = "golden-dent-bot"
+version = "0.1.0"
+description = "Telegram bot for Golden Dent clinic"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "python-telegram-bot>=20.7",
+  "apscheduler>=3.10",
+  "gspread>=6.1",
+  "google-auth>=2.27",
+  "pydantic-settings>=2.2",
+  "python-dotenv>=1.0",
+  "sqlalchemy>=2.0",
+  "python-dateutil>=2.9",
+]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

@@ -1,0 +1,10 @@
+﻿fastapi>=0.110
+uvicorn[standard]>=0.27
+python-telegram-bot>=20.7
+apscheduler>=3.10
+gspread>=6.1
+google-auth>=2.27
+pydantic-settings>=2.2
+python-dotenv>=1.0
+sqlalchemy>=2.0
+python-dateutil>=2.9
