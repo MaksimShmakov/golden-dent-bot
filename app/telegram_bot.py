@@ -1,10 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from dateutil.relativedelta import relativedelta
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -14,10 +15,18 @@ from telegram.ext import (
     filters,
 )
 
-from app.messages import send_main_message, send_start_message
+from app.messages import (
+    ABOUT_TEXT,
+    SPECIAL_OFFERS_TEXT,
+    send_info_start_message,
+    send_main_message,
+    send_start_message,
+)
+from app.scheduler import send_daily_messages
 from app.sheets import SheetsClient
 from app.storage import SQLiteStateStore
-from app.scheduler import send_daily_messages
+
+logger = logging.getLogger("golden-dent")
 
 
 def build_application(
@@ -43,15 +52,33 @@ def build_application(
     application.add_handler(CallbackQueryHandler(remind_2w_cb, pattern="^remind_2w$"))
     application.add_handler(CallbackQueryHandler(not_ready_cb, pattern="^not_ready$"))
     application.add_handler(CallbackQueryHandler(confirm_appt_cb, pattern="^confirm_appt$"))
+    application.add_handler(CallbackQueryHandler(about_us_cb, pattern="^about_us$"))
+    application.add_handler(CallbackQueryHandler(special_offers_cb, pattern="^special_offers$"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return application
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat:
+    if not update.effective_chat or not update.effective_user:
         return
     _record_user(update, context)
-    await send_start_message(context.bot, update.effective_chat.id)
+    await send_info_start_message(context.bot, update.effective_chat.id)
+
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    now = datetime.now(tz)
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    if not store.mark_activated(update.effective_user.id, now):
+        return
+
+    scheduler = context.application.bot_data["scheduler"]
+    scheduler.add_job(
+        send_start_message,
+        trigger="date",
+        run_date=now + timedelta(days=3),
+        id=f"start_followup_{update.effective_user.id}",
+        replace_existing=True,
+        args=[context.bot, update.effective_chat.id],
+    )
 
 
 async def test_main_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -99,7 +126,8 @@ async def test_daily_debug_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
             reason = "OK: 6-месячное напоминание"
         else:
             reason = "NO: не завтра и не 6 месяцев"
-        lines.append(f"{count}) {entry.dt.strftime('%d.%m.%Y %H:%M')} | {entry.username} | {reason}")
+        line = f"{count}) {entry.dt.strftime('%d.%m.%Y %H:%M')} | {entry.username} | {reason}"
+        lines.append(line)
 
     if count == 0:
         lines.append("Нет валидных строк (проверь формат даты и username).")
@@ -163,6 +191,24 @@ async def confirm_appt_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.message.reply_text("Отлично, будем ждать Вас!")
 
 
+async def about_us_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    await query.answer()
+    await query.message.reply_text(ABOUT_TEXT)
+
+
+async def special_offers_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    await query.answer()
+    await query.message.reply_text(SPECIAL_OFFERS_TEXT)
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
@@ -187,8 +233,22 @@ def _record_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user:
         return
     user = update.effective_user
-    if not user.username:
-        return
     store: SQLiteStateStore = context.application.bot_data["store"]
     tz = ZoneInfo(context.application.bot_data["tz"])
-    store.upsert_user(user.username, user.id, datetime.now(tz))
+    now = datetime.now(tz)
+
+    if user.username:
+        store.upsert_user(user.username, user.id, now)
+        changed = store.upsert_client(user.id, user.username, now)
+    else:
+        changed = store.remove_client(user.id)
+
+    if not changed:
+        return
+
+    sheets: SheetsClient = context.application.bot_data["sheets"]
+    clients_tab = context.application.bot_data["config"].google_clients_tab
+    try:
+        sheets.sync_client_usernames(clients_tab, store.list_client_usernames())
+    except Exception as exc:
+        logger.warning("Failed to sync clients sheet %s: %s", clients_tab, exc)

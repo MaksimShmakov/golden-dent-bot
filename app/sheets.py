@@ -1,8 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
 
 import gspread
 
@@ -25,6 +25,26 @@ class SheetsClient:
     def append_undelivered(self, tab_name: str, row: list[str]) -> None:
         ws = self._sheet.worksheet(tab_name)
         ws.append_row(row, value_input_option="USER_ENTERED")
+
+    def sync_client_usernames(self, tab_name: str, usernames: list[str]) -> None:
+        ws = self._sheet.worksheet(tab_name)
+        existing = ws.col_values(1)
+        header = existing[0].strip() if existing and existing[0].strip() else "tg_username"
+
+        unique_usernames = sorted(
+            {username.strip().lower() for username in usernames if username.strip()}
+        )
+        target = [header, *unique_usernames]
+        if existing == target:
+            return
+
+        ws.update(
+            f"A1:A{len(target)}",
+            [[value] for value in target],
+            value_input_option="USER_ENTERED",
+        )
+        if len(existing) > len(target):
+            ws.batch_clear([f"A{len(target) + 1}:A{len(existing)}"])
 
     def iter_entries(self, tab_name: str) -> Iterable[SheetEntry]:
         ws = self._sheet.worksheet(tab_name)

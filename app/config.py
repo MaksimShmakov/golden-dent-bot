@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     google_comments_tab: str = "Не готов записаться (комментарии)"
     google_appointments_tab: str = "Записи для бота"
     google_undelivered_tab: str = "Не доставлено"
+    google_clients_tab: str = "БД - клиенты"
 
     tz: str = "Asia/Novosibirsk"
     daily_reminder_hour: int = 9

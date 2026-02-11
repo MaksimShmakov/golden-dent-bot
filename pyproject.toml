@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "golden-dent-bot"
 version = "0.1.0"
 description = "Telegram bot for Golden Dent clinic"

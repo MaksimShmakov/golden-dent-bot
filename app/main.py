@@ -20,6 +20,17 @@ async def lifespan(app: FastAPI):
     app.state.config = config
     app.state.sheets = SheetsClient(config.google_sheet_id, config.google_service_account_json)
     app.state.store = SQLiteStateStore(config.data_dir)
+    try:
+        app.state.sheets.sync_client_usernames(
+            config.google_clients_tab,
+            app.state.store.list_client_usernames(),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to sync clients sheet %s on startup: %s",
+            config.google_clients_tab,
+            exc,
+        )
     app.state.scheduler = build_scheduler(config.data_dir, config.tz)
 
     application = build_application(

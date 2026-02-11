@@ -1,5 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -8,13 +9,13 @@ from apscheduler.triggers.cron import CronTrigger
 from dateutil.relativedelta import relativedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
-import logging
 
+from app.messages import send_main_message
 from app.sheets import SheetsClient
 from app.storage import SQLiteStateStore
-from app.messages import send_main_message
 
 logger = logging.getLogger("golden-dent")
+
 
 def build_scheduler(data_dir: str, tz: str) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=ZoneInfo(tz))
