@@ -17,9 +17,18 @@ from telegram.ext import (
 
 from app.messages import (
     ABOUT_TEXT,
-    SPECIAL_OFFERS_TEXT,
+    ADULT_SUBSCRIPTION_TEXT,
+    CHILD_SUBSCRIPTION_TEXT,
+    FLASH_WHITENING_TEXT,
+    IMPLANT_CROWN_TEXT,
+    ULTRASOUND_EXTRACTION_TEXT,
+    build_buy_subscription_keyboard,
+    build_flash_contact_keyboard,
+    build_implant_contact_keyboard,
+    build_ultrasound_contact_keyboard,
     send_info_start_message,
     send_main_message,
+    send_special_offers_message,
     send_start_message,
 )
 from app.scheduler import send_daily_messages
@@ -49,11 +58,20 @@ def build_application(
     application.add_handler(CommandHandler("test_daily", test_daily_cmd))
     application.add_handler(CommandHandler("test_daily_debug", test_daily_debug_cmd))
     application.add_handler(CommandHandler("whoami", whoami_cmd))
+
     application.add_handler(CallbackQueryHandler(remind_2w_cb, pattern="^remind_2w$"))
     application.add_handler(CallbackQueryHandler(not_ready_cb, pattern="^not_ready$"))
     application.add_handler(CallbackQueryHandler(confirm_appt_cb, pattern="^confirm_appt$"))
     application.add_handler(CallbackQueryHandler(about_us_cb, pattern="^about_us$"))
     application.add_handler(CallbackQueryHandler(special_offers_cb, pattern="^special_offers$"))
+    application.add_handler(CallbackQueryHandler(offer_adult_cb, pattern="^offer_adult$"))
+    application.add_handler(CallbackQueryHandler(offer_child_cb, pattern="^offer_child$"))
+    application.add_handler(CallbackQueryHandler(offer_implant_cb, pattern="^offer_implant$"))
+    application.add_handler(
+        CallbackQueryHandler(offer_ultrasound_cb, pattern="^offer_ultrasound$")
+    )
+    application.add_handler(CallbackQueryHandler(offer_flash_cb, pattern="^offer_flash$"))
+
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return application
 
@@ -206,7 +224,67 @@ async def special_offers_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     _record_user(update, context)
     await query.answer()
-    await query.message.reply_text(SPECIAL_OFFERS_TEXT)
+    await send_special_offers_message(context.bot, query.message.chat.id)
+
+
+async def offer_adult_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    await query.answer()
+    await query.message.reply_text(
+        ADULT_SUBSCRIPTION_TEXT,
+        reply_markup=build_buy_subscription_keyboard(),
+    )
+
+
+async def offer_child_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    await query.answer()
+    await query.message.reply_text(
+        CHILD_SUBSCRIPTION_TEXT,
+        reply_markup=build_buy_subscription_keyboard(),
+    )
+
+
+async def offer_implant_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    await query.answer()
+    await query.message.reply_text(
+        IMPLANT_CROWN_TEXT,
+        reply_markup=build_implant_contact_keyboard(),
+    )
+
+
+async def offer_ultrasound_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    await query.answer()
+    await query.message.reply_text(
+        ULTRASOUND_EXTRACTION_TEXT,
+        reply_markup=build_ultrasound_contact_keyboard(),
+    )
+
+
+async def offer_flash_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    await query.answer()
+    await query.message.reply_text(
+        FLASH_WHITENING_TEXT,
+        reply_markup=build_flash_contact_keyboard(),
+    )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
