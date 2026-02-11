@@ -1,7 +1,10 @@
+import logging
 from pathlib import Path
 from urllib.parse import quote
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+logger = logging.getLogger("golden-dent")
 
 MAIN_MESSAGE = (
     "Здравствуйте!\n\n"
@@ -82,6 +85,7 @@ async def send_info_start_message(bot, chat_id: int) -> None:
             )
         return
 
+    logger.warning("Start logo file not found: %s", _LOGO_PATH)
     await bot.send_message(
         chat_id=chat_id,
         text=INFO_START_MESSAGE,
