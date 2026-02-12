@@ -21,7 +21,7 @@ START_MESSAGE = (
 
 INFO_START_MESSAGE = (
     "Здравствуйте!\n"
-    "Клиника «Голден Дент», рады видеть в числе наших пациентов."
+    "Клиника «Голден Дент», рады видеть вас в числе наших пациентов."
 )
 
 ABOUT_TEXT = (
@@ -88,11 +88,11 @@ ULTRASOUND_EXTRACTION_TEXT = (
     "УДАЛЕНИЕ ЗУБОВ. - 9 900 ₽\n\n"
     "🔘В спецпредложение входит:\n"
     "✔️глав врач ушел, нужно у него уточнить этапы…\n"
-    "✔️\n"
-    "✔️\n"
-    "✔️\n"
-    "✔️\n"
-    "✔️\n\n"
+    "✔️осмотр и консультация стоматолога - хирурга\n"
+    "✔️анестезия\n"
+    "✔️удаление зуба с помощью Пьезо (ультразвука)\n"
+    "✔️антисептическая обработка\n"
+    "✔️наложение швов\n\n"
     "Без боли и страха - максимальный комфорт!\n\n"
     "*Есть противопоказания, необходима консультация специалиста. "
     "Вы можете уточнить условия акции у администраторов GD."
@@ -115,7 +115,8 @@ FLASH_WHITENING_TEXT = (
 _ADMIN_USERNAME = "GoldenDentNSK"
 _LOGO_PATH = Path(__file__).resolve().parent.parent / "logo-gd.jpg"
 _SPECIAL_SUG_PATH = Path(__file__).resolve().parent.parent / "special-sug.jpg"
-_SUBSCRIPTION_URL = "https://xn--c1acadb6aqcc1c.xn--p1ai"
+_ABOUT_PHOTO_PATH = Path(__file__).resolve().parent.parent / "ew-photo.jpg"
+_SUBSCRIPTION_URL = "https://голдендент.рф/оплата-абонемента"
 
 CONTACT_TEXT = "Здравствуйте! Я перешел от телеграмм-бота."
 CONTACT_URL = f"https://t.me/{_ADMIN_USERNAME}?text={quote(CONTACT_TEXT)}"
@@ -176,21 +177,29 @@ def build_special_offers_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_buy_subscription_keyboard() -> InlineKeyboardMarkup:
+    return _build_offer_actions_keyboard(BOOK_APPOINTMENT_URL)
+
+
+def _build_offer_actions_keyboard(contact_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Купить абонемент", url=_SUBSCRIPTION_URL)]]
+        [
+            [InlineKeyboardButton("Записаться", url=contact_url)],
+            [InlineKeyboardButton("Купить абонемент", url=_SUBSCRIPTION_URL)],
+            [InlineKeyboardButton("В начало", callback_data="go_start")],
+        ]
     )
 
 
 def build_implant_contact_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Записаться", url=IMPLANT_CONTACT_URL)]])
+    return _build_offer_actions_keyboard(IMPLANT_CONTACT_URL)
 
 
 def build_ultrasound_contact_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Записаться", url=ULTRASOUND_CONTACT_URL)]])
+    return _build_offer_actions_keyboard(ULTRASOUND_CONTACT_URL)
 
 
 def build_flash_contact_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Записаться", url=FLASH_CONTACT_URL)]])
+    return _build_offer_actions_keyboard(FLASH_CONTACT_URL)
 
 
 async def send_main_message(bot, chat_id: int) -> None:
@@ -237,3 +246,13 @@ async def send_special_offers_message(bot, chat_id: int) -> None:
         text=SPECIAL_OFFERS_HEADER,
         reply_markup=build_special_offers_keyboard(),
     )
+
+
+async def send_about_message(bot, chat_id: int) -> None:
+    if _ABOUT_PHOTO_PATH.exists():
+        with _ABOUT_PHOTO_PATH.open("rb") as image:
+            await bot.send_photo(chat_id=chat_id, photo=image, caption=ABOUT_TEXT)
+        return
+
+    logger.warning("About image file not found: %s", _ABOUT_PHOTO_PATH)
+    await bot.send_message(chat_id=chat_id, text=ABOUT_TEXT)

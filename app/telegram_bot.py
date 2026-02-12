@@ -16,7 +16,6 @@ from telegram.ext import (
 )
 
 from app.messages import (
-    ABOUT_TEXT,
     ADULT_SUBSCRIPTION_TEXT,
     CHILD_SUBSCRIPTION_TEXT,
     FLASH_WHITENING_TEXT,
@@ -26,6 +25,7 @@ from app.messages import (
     build_flash_contact_keyboard,
     build_implant_contact_keyboard,
     build_ultrasound_contact_keyboard,
+    send_about_message,
     send_info_start_message,
     send_main_message,
     send_special_offers_message,
@@ -62,6 +62,7 @@ def build_application(
     application.add_handler(CallbackQueryHandler(remind_2w_cb, pattern="^remind_2w$"))
     application.add_handler(CallbackQueryHandler(not_ready_cb, pattern="^not_ready$"))
     application.add_handler(CallbackQueryHandler(confirm_appt_cb, pattern="^confirm_appt$"))
+    application.add_handler(CallbackQueryHandler(go_start_cb, pattern="^go_start$"))
     application.add_handler(CallbackQueryHandler(about_us_cb, pattern="^about_us$"))
     application.add_handler(CallbackQueryHandler(special_offers_cb, pattern="^special_offers$"))
     application.add_handler(CallbackQueryHandler(offer_adult_cb, pattern="^offer_adult$"))
@@ -215,7 +216,16 @@ async def about_us_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     _record_user(update, context)
     await query.answer()
-    await query.message.reply_text(ABOUT_TEXT)
+    await send_about_message(context.bot, query.message.chat.id)
+
+
+async def go_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    await query.answer()
+    await send_info_start_message(context.bot, query.message.chat.id)
 
 
 async def special_offers_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
