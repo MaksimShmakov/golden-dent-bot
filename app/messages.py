@@ -137,10 +137,24 @@ FLASH_CONTACT_TEXT = (
     "Здравствуйте! Меня заинтересовала услуга "
     "\"Немецкое профессиональное отбеливание \"FLASH\"\""
 )
+ADULT_SUBSCRIPTION_CONTACT_TEXT = (
+    "Здравствуйте! Меня заинтересовала услуга "
+    "\"Взрослый абонемент на 4 профессиональных чистки зубов\""
+)
+CHILD_SUBSCRIPTION_CONTACT_TEXT = (
+    "Здравствуйте! Меня заинтересовала услуга "
+    "\"Детский абонемент на 4 профессиональных чистки зубов\""
+)
 
 IMPLANT_CONTACT_URL = f"https://t.me/{_ADMIN_USERNAME}?text={quote(IMPLANT_CONTACT_TEXT)}"
 ULTRASOUND_CONTACT_URL = f"https://t.me/{_ADMIN_USERNAME}?text={quote(ULTRASOUND_CONTACT_TEXT)}"
 FLASH_CONTACT_URL = f"https://t.me/{_ADMIN_USERNAME}?text={quote(FLASH_CONTACT_TEXT)}"
+ADULT_SUBSCRIPTION_CONTACT_URL = (
+    f"https://t.me/{_ADMIN_USERNAME}?text={quote(ADULT_SUBSCRIPTION_CONTACT_TEXT)}"
+)
+CHILD_SUBSCRIPTION_CONTACT_URL = (
+    f"https://t.me/{_ADMIN_USERNAME}?text={quote(CHILD_SUBSCRIPTION_CONTACT_TEXT)}"
+)
 
 
 def build_main_keyboard() -> InlineKeyboardMarkup:
@@ -176,22 +190,26 @@ def build_special_offers_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def build_buy_subscription_keyboard() -> InlineKeyboardMarkup:
-    return _build_offer_actions_keyboard(BOOK_APPOINTMENT_URL)
+def build_adult_subscription_keyboard() -> InlineKeyboardMarkup:
+    return _build_offer_actions_keyboard(ADULT_SUBSCRIPTION_CONTACT_URL)
 
 
-def _build_offer_actions_keyboard(contact_url: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Записаться", url=contact_url)],
-            [InlineKeyboardButton("Купить абонемент", url=_SUBSCRIPTION_URL)],
-            [InlineKeyboardButton("В начало", callback_data="go_start")],
-        ]
-    )
+def build_child_subscription_keyboard() -> InlineKeyboardMarkup:
+    return _build_offer_actions_keyboard(CHILD_SUBSCRIPTION_CONTACT_URL)
+
+
+def _build_offer_actions_keyboard(
+    contact_url: str, include_buy_subscription: bool = True
+) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("Записаться", url=contact_url)]]
+    if include_buy_subscription:
+        rows.append([InlineKeyboardButton("Купить абонемент", url=_SUBSCRIPTION_URL)])
+    rows.append([InlineKeyboardButton("В начало", callback_data="go_start")])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_implant_contact_keyboard() -> InlineKeyboardMarkup:
-    return _build_offer_actions_keyboard(IMPLANT_CONTACT_URL)
+    return _build_offer_actions_keyboard(IMPLANT_CONTACT_URL, include_buy_subscription=False)
 
 
 def build_ultrasound_contact_keyboard() -> InlineKeyboardMarkup:

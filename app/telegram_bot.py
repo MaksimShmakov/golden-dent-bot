@@ -21,7 +21,8 @@ from app.messages import (
     FLASH_WHITENING_TEXT,
     IMPLANT_CROWN_TEXT,
     ULTRASOUND_EXTRACTION_TEXT,
-    build_buy_subscription_keyboard,
+    build_adult_subscription_keyboard,
+    build_child_subscription_keyboard,
     build_flash_contact_keyboard,
     build_implant_contact_keyboard,
     build_ultrasound_contact_keyboard,
@@ -245,7 +246,7 @@ async def offer_adult_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     await query.message.reply_text(
         ADULT_SUBSCRIPTION_TEXT,
-        reply_markup=build_buy_subscription_keyboard(),
+        reply_markup=build_adult_subscription_keyboard(),
     )
 
 
@@ -257,7 +258,7 @@ async def offer_child_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     await query.message.reply_text(
         CHILD_SUBSCRIPTION_TEXT,
-        reply_markup=build_buy_subscription_keyboard(),
+        reply_markup=build_child_subscription_keyboard(),
     )
 
 

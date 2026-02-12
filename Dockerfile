@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY app /app/app
 COPY logo-gd.jpg /app/logo-gd.jpg
 COPY special-sug.jpg /app/special-sug.jpg
+COPY ew-photo.jpg /app/ew-photo.jpg
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
