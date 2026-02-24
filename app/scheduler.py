@@ -61,17 +61,27 @@ async def send_daily_messages(
     undelivered_tab: str,
     tz: str,
     store: SQLiteStateStore,
-) -> None:
+) -> dict[str, int]:
     zone = ZoneInfo(tz)
     today = datetime.now(zone).date()
     tomorrow = today + timedelta(days=1)
     _flush_undelivered(sheets, undelivered_tab, zone, store)
+    stats = {
+        "rows_total": 0,
+        "appointment_candidates": 0,
+        "surgeon_candidates": 0,
+        "periodic_candidates": 0,
+        "sent": 0,
+        "failed": 0,
+    }
 
     for entry in sheets.iter_entries(tab_name):
+        stats["rows_total"] += 1
         entry_date = entry.dt.date()
 
         if entry_date == tomorrow:
-            await _send_appointment_message(
+            stats["appointment_candidates"] += 1
+            sent = await _send_appointment_message(
                 bot=bot,
                 sheets=sheets,
                 appointments_tab=tab_name,
@@ -84,9 +94,12 @@ async def send_daily_messages(
                 kind="appointment",
                 text_prefix="Здравствуйте! Вы записаны на завтра",
             )
+            stats["sent"] += int(sent)
+            stats["failed"] += int(not sent)
 
         if entry.surgeon_dt and entry.surgeon_dt.date() == tomorrow and entry.surgeon_dt != entry.dt:
-            await _send_appointment_message(
+            stats["surgeon_candidates"] += 1
+            sent = await _send_appointment_message(
                 bot=bot,
                 sheets=sheets,
                 appointments_tab=tab_name,
@@ -99,9 +112,12 @@ async def send_daily_messages(
                 kind="surgeon_appointment",
                 text_prefix="Здравствуйте! Вы записаны на плановый визит хирурга завтра",
             )
+            stats["sent"] += int(sent)
+            stats["failed"] += int(not sent)
 
         if entry_date + relativedelta(months=+entry.reminder_months) == today:
-            await _send_periodic_message(
+            stats["periodic_candidates"] += 1
+            sent = await _send_periodic_message(
                 bot=bot,
                 sheets=sheets,
                 appointments_tab=tab_name,
@@ -112,6 +128,10 @@ async def send_daily_messages(
                 zone=zone,
                 store=store,
             )
+            stats["sent"] += int(sent)
+            stats["failed"] += int(not sent)
+
+    return stats
 
 
 async def _send_appointment_message(
@@ -126,7 +146,7 @@ async def _send_appointment_message(
     store: SQLiteStateStore,
     kind: str,
     text_prefix: str,
-) -> None:
+) -> bool:
     local_dt = dt.replace(tzinfo=zone) if dt.tzinfo is None else dt.astimezone(zone)
     date_str = local_dt.strftime("%d.%m.%Y")
     time_str = local_dt.strftime("%H:%M")
@@ -156,6 +176,7 @@ async def _send_appointment_message(
     try:
         await bot.send_message(chat_id=chat_id or fallback, text=text, reply_markup=keyboard)
         sheets.update_appointment_status(appointments_tab, row_number, "отправлено")
+        return True
     except TelegramError as exc:
         logger.warning("Failed to send appointment to %s: %s", fallback, exc)
         _log_undelivered(
@@ -167,6 +188,7 @@ async def _send_appointment_message(
             kind=kind,
             reason=str(exc),
         )
+        return False
 
 
 async def _send_periodic_message(
@@ -179,7 +201,7 @@ async def _send_periodic_message(
     reminder_months: int,
     zone,
     store: SQLiteStateStore,
-) -> None:
+) -> bool:
     chat_id = store.get_chat_id(username)
     fallback = username if username.startswith("@") or username.isdigit() else f"@{username}"
     try:
@@ -187,6 +209,7 @@ async def _send_periodic_message(
         sheets.update_appointment_status(appointments_tab, row_number, "отправлено")
         if chat_id:
             store.set_reminder_context(chat_id, row_number, datetime.now(zone))
+        return True
     except TelegramError as exc:
         logger.warning("Failed to send periodic reminder to %s: %s", fallback, exc)
         _log_undelivered(
@@ -198,6 +221,7 @@ async def _send_periodic_message(
             kind=f"{reminder_months}m",
             reason=str(exc),
         )
+        return False
 
 
 def _build_reschedule_url(dt: datetime) -> str:

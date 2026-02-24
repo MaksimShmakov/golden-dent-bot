@@ -144,7 +144,21 @@ async def test_daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     tab = context.application.bot_data["config"].google_appointments_tab
     undelivered_tab = context.application.bot_data["config"].google_undelivered_tab
     store: SQLiteStateStore = context.application.bot_data["store"]
-    await send_daily_messages(context.bot, sheets, tab, undelivered_tab, tz, store)
+    stats = await send_daily_messages(context.bot, sheets, tab, undelivered_tab, tz, store)
+    if update.effective_chat:
+        await update.effective_chat.send_message(
+            "\n".join(
+                [
+                    "Тест ежедневной рассылки завершен.",
+                    f"Строк обработано: {stats['rows_total']}",
+                    f"Кандидаты (запись на завтра): {stats['appointment_candidates']}",
+                    f"Кандидаты (хирург на завтра): {stats['surgeon_candidates']}",
+                    f"Кандидаты (периодические): {stats['periodic_candidates']}",
+                    f"Успешно отправлено: {stats['sent']}",
+                    f"Ошибок отправки: {stats['failed']}",
+                ]
+            )
+        )
 
 
 async def test_daily_debug_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
