@@ -5,7 +5,14 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from dateutil.relativedelta import relativedelta
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -38,6 +45,13 @@ from app.storage import SQLiteStateStore
 
 logger = logging.getLogger("golden-dent")
 
+_CANCEL_REASON_LABELS = {
+    "plans": "Изменились планы",
+    "irrelevant": "Неактуально",
+    "sick": "Заболел",
+    "other": "Другое",
+}
+
 
 def build_application(
     bot_token: str,
@@ -60,9 +74,22 @@ def build_application(
     application.add_handler(CommandHandler("test_daily_debug", test_daily_debug_cmd))
     application.add_handler(CommandHandler("whoami", whoami_cmd))
 
-    application.add_handler(CallbackQueryHandler(remind_2w_cb, pattern="^remind_2w$"))
-    application.add_handler(CallbackQueryHandler(not_ready_cb, pattern="^not_ready$"))
-    application.add_handler(CallbackQueryHandler(confirm_appt_cb, pattern="^confirm_appt$"))
+    application.add_handler(
+        CallbackQueryHandler(remind_2w_cb, pattern=r"^remind_2w(?::\d+)?$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(not_ready_cb, pattern=r"^not_ready(?::\d+)?$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(confirm_appt_cb, pattern=r"^confirm_appt(?::\d+)?$")
+    )
+    application.add_handler(CallbackQueryHandler(cancel_appt_cb, pattern=r"^cancel_appt:\d+$"))
+    application.add_handler(
+        CallbackQueryHandler(
+            cancel_reason_cb,
+            pattern=r"^cancel_reason:\d+:(plans|irrelevant|sick|other)$",
+        )
+    )
     application.add_handler(CallbackQueryHandler(go_start_cb, pattern="^go_start$"))
     application.add_handler(CallbackQueryHandler(about_us_cb, pattern="^about_us$"))
     application.add_handler(CallbackQueryHandler(special_offers_cb, pattern="^special_offers$"))
@@ -74,6 +101,7 @@ def build_application(
     )
     application.add_handler(CallbackQueryHandler(offer_flash_cb, pattern="^offer_flash$"))
 
+    application.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return application
 
@@ -83,6 +111,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _record_user(update, context)
     await send_info_start_message(context.bot, update.effective_chat.id)
+    await _request_contact_if_needed(update, context)
 
     tz = ZoneInfo(context.application.bot_data["tz"])
     now = datetime.now(tz)
@@ -141,12 +170,17 @@ async def test_daily_debug_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
         count += 1
         entry_date = entry.dt.date()
         if entry_date == tomorrow:
-            reason = "OK: напоминание на завтра"
-        elif entry_date + relativedelta(months=+6) == today:
-            reason = "OK: 6-месячное напоминание"
+            reason = "OK: напоминание о записи на завтра"
+        elif entry.surgeon_dt and entry.surgeon_dt.date() == tomorrow:
+            reason = "OK: напоминание о плановом визите хирурга"
+        elif entry_date + relativedelta(months=+entry.reminder_months) == today:
+            reason = f"OK: {entry.reminder_months}-месячное напоминание"
         else:
-            reason = "NO: не завтра и не 6 месяцев"
-        line = f"{count}) {entry.dt.strftime('%d.%m.%Y %H:%M')} | {entry.username} | {reason}"
+            reason = "NO: сегодня не подходит ни одно условие"
+        line = (
+            f"{count}) row={entry.row_number} | "
+            f"{entry.dt.strftime('%d.%m.%Y %H:%M')} | {entry.username} | {reason}"
+        )
         lines.append(line)
 
     if count == 0:
@@ -170,7 +204,7 @@ async def remind_2w_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     _record_user(update, context)
     await query.answer()
-    await query.message.reply_text("Хорошо, вернёмся через 2 недели")
+    await query.message.reply_text("Хорошо, вернёмся через 2 недели. До свидания, хорошего дня!")
 
     scheduler = context.application.bot_data["scheduler"]
     tz = ZoneInfo(context.application.bot_data["tz"])
@@ -186,20 +220,32 @@ async def remind_2w_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         args=[context.bot, chat_id],
     )
 
+    row_number = _resolve_appointment_row(query.data or "", query.message.chat.id, context)
+    if row_number:
+        _set_appointment_status(context, row_number, "напомнить через 2 недели")
+
 
 async def not_ready_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if not query or not query.message:
+    if not query or not query.message or not query.from_user:
         return
     _record_user(update, context)
     await query.answer()
     await query.message.reply_text("Подскажите, пожалуйста, почему не получается?")
 
+    row_number = _resolve_appointment_row(query.data or "", query.message.chat.id, context)
     store: SQLiteStateStore = context.application.bot_data["store"]
     tz = ZoneInfo(context.application.bot_data["tz"])
-    user = query.from_user
-    username = f"@{user.username}" if user and user.username else f"id:{user.id}"
-    store.set_pending(user.id, username, datetime.now(tz))
+    username = f"@{query.from_user.username}" if query.from_user.username else f"id:{query.from_user.id}"
+    store.set_pending(
+        user_id=query.from_user.id,
+        username=username,
+        created_at=datetime.now(tz),
+        action_type="not_ready_comment",
+        appointment_row=row_number,
+    )
+    if row_number:
+        _set_appointment_status(context, row_number, "не готов, ожидаем комментарий")
 
 
 async def confirm_appt_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -209,6 +255,87 @@ async def confirm_appt_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     _record_user(update, context)
     await query.answer()
     await query.message.reply_text("Отлично, будем ждать Вас!")
+
+    row_number = _parse_callback_row(query.data or "", "confirm_appt")
+    if row_number:
+        _set_appointment_status(context, row_number, "подтвердил")
+
+
+async def cancel_appt_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    await query.answer()
+
+    row_number = _parse_callback_row(query.data or "", "cancel_appt")
+    if not row_number:
+        await query.message.reply_text("Не удалось определить запись для отмены.")
+        return
+
+    _set_appointment_status(context, row_number, "отменил")
+    await query.message.reply_text(
+        "Уточните, пожалуйста, причину отмены:",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "1. Изменились планы",
+                        callback_data=f"cancel_reason:{row_number}:plans",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "2. Неактуально",
+                        callback_data=f"cancel_reason:{row_number}:irrelevant",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "3. Заболел",
+                        callback_data=f"cancel_reason:{row_number}:sick",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "4. Другое",
+                        callback_data=f"cancel_reason:{row_number}:other",
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+async def cancel_reason_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message or not query.from_user:
+        return
+    _record_user(update, context)
+    await query.answer()
+
+    row_number, reason_key = _parse_cancel_reason_callback(query.data or "")
+    if not row_number or not reason_key:
+        await query.message.reply_text("Не удалось определить причину отмены.")
+        return
+
+    reason_text = _CANCEL_REASON_LABELS.get(reason_key, "")
+    if reason_key != "other":
+        _set_appointment_cancel_reason(context, row_number, reason_text)
+        await query.message.reply_text("Спасибо, отметили отмену записи.")
+        return
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    username = f"@{query.from_user.username}" if query.from_user.username else f"id:{query.from_user.id}"
+    store.set_pending(
+        user_id=query.from_user.id,
+        username=username,
+        created_at=datetime.now(tz),
+        action_type="cancel_other_reason",
+        appointment_row=row_number,
+    )
+    await query.message.reply_text("Напишите, пожалуйста, причину отмены в свободной форме.")
 
 
 async def about_us_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -298,10 +425,54 @@ async def offer_flash_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+
+    _record_user(update, context)
+    contact = update.message.contact
+    if not contact:
+        return
+
+    if contact.user_id and contact.user_id != update.effective_user.id:
+        await update.message.reply_text(
+            "Пожалуйста, отправьте свой номер через кнопку ниже.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    now = datetime.now(tz)
+    user = update.effective_user
+    full_name = _build_full_name(user)
+    changed = store.upsert_client(
+        user_id=user.id,
+        username=user.username,
+        full_name=full_name,
+        phone=contact.phone_number,
+        updated_at=now,
+    )
+
+    if changed:
+        _sync_clients_sheet(context)
+
+    await update.message.reply_text(
+        "Спасибо! Номер сохранен.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
+
     _record_user(update, context)
+    text = update.message.text.strip()
+    if text.lower() == "пропустить":
+        await update.message.reply_text("Хорошо, продолжим без номера.", reply_markup=ReplyKeyboardRemove())
+        return
+
     store: SQLiteStateStore = context.application.bot_data["store"]
     pending = store.pop_pending(update.effective_user.id)
     if not pending:
@@ -310,17 +481,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     sheets: SheetsClient = context.application.bot_data["sheets"]
     tz = ZoneInfo(context.application.bot_data["tz"])
     now_str = datetime.now(tz).strftime("%d.%m.%Y %H:%M")
-    comment = update.message.text.strip()
+    profile = store.get_client(update.effective_user.id)
+    full_name = profile.full_name if profile else ""
+    phone = profile.phone if profile else ""
+
+    if pending.action_type == "cancel_other_reason":
+        if pending.appointment_row:
+            _set_appointment_cancel_reason(context, pending.appointment_row, text)
+            _set_appointment_status(context, pending.appointment_row, "отменил")
+        sheets.append_comment(
+            context.application.bot_data["config"].google_comments_tab,
+            [now_str, pending.username, f"Отмена записи: {text}", full_name, phone],
+        )
+        await update.message.reply_text("Спасибо, причина отмены записана.")
+        return
+
     sheets.append_comment(
         context.application.bot_data["config"].google_comments_tab,
-        [now_str, pending.username, comment],
+        [now_str, pending.username, text, full_name, phone],
     )
+    if pending.appointment_row:
+        _set_appointment_status(context, pending.appointment_row, "не готов, комментарий")
     await update.message.reply_text("Спасибо, комментарий записан!")
 
 
 def _record_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user:
         return
+
     user = update.effective_user
     store: SQLiteStateStore = context.application.bot_data["store"]
     tz = ZoneInfo(context.application.bot_data["tz"])
@@ -328,16 +516,108 @@ def _record_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if user.username:
         store.upsert_user(user.username, user.id, now)
-        changed = store.upsert_client(user.id, user.username, now)
-    else:
-        changed = store.remove_client(user.id)
 
-    if not changed:
+    existing = store.get_client(user.id)
+    phone = existing.phone if existing else ""
+    changed = store.upsert_client(
+        user_id=user.id,
+        username=user.username,
+        full_name=_build_full_name(user),
+        phone=phone,
+        updated_at=now,
+    )
+
+    if changed:
+        _sync_clients_sheet(context)
+
+
+async def _request_contact_if_needed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or not update.effective_chat:
         return
 
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    profile = store.get_client(update.effective_user.id)
+    if profile and profile.phone:
+        return
+
+    keyboard = ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("Поделиться номером", request_contact=True)],
+            [KeyboardButton("Пропустить")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await update.effective_chat.send_message(
+        "Для удобства связи можете отправить номер телефона кнопкой ниже.",
+        reply_markup=keyboard,
+    )
+
+
+def _sync_clients_sheet(context: ContextTypes.DEFAULT_TYPE) -> None:
     sheets: SheetsClient = context.application.bot_data["sheets"]
+    store: SQLiteStateStore = context.application.bot_data["store"]
     clients_tab = context.application.bot_data["config"].google_clients_tab
     try:
-        sheets.sync_client_usernames(clients_tab, store.list_client_usernames())
-    except Exception as exc:
+        sheets.sync_clients(clients_tab, store.list_clients())
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to sync clients sheet %s: %s", clients_tab, exc)
+
+
+def _build_full_name(user) -> str:
+    parts = [user.last_name or "", user.first_name or ""]
+    return " ".join(part for part in parts if part).strip()
+
+
+def _resolve_appointment_row(
+    callback_data: str,
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int | None:
+    for prefix in ("remind_2w", "not_ready"):
+        row = _parse_callback_row(callback_data, prefix)
+        if row:
+            return row
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    return store.get_reminder_context(chat_id)
+
+
+def _parse_callback_row(callback_data: str, prefix: str) -> int | None:
+    if callback_data == prefix:
+        return None
+    if not callback_data.startswith(f"{prefix}:"):
+        return None
+    value = callback_data.split(":", maxsplit=1)[1]
+    if not value.isdigit():
+        return None
+    return int(value)
+
+
+def _parse_cancel_reason_callback(callback_data: str) -> tuple[int | None, str | None]:
+    parts = callback_data.split(":")
+    if len(parts) != 3:
+        return None, None
+    _, row_value, reason_key = parts
+    if not row_value.isdigit():
+        return None, None
+    return int(row_value), reason_key
+
+
+def _set_appointment_status(
+    context: ContextTypes.DEFAULT_TYPE,
+    row_number: int,
+    status: str,
+) -> None:
+    sheets: SheetsClient = context.application.bot_data["sheets"]
+    tab = context.application.bot_data["config"].google_appointments_tab
+    sheets.update_appointment_status(tab, row_number, status)
+
+
+def _set_appointment_cancel_reason(
+    context: ContextTypes.DEFAULT_TYPE,
+    row_number: int,
+    reason: str,
+) -> None:
+    sheets: SheetsClient = context.application.bot_data["sheets"]
+    tab = context.application.bot_data["config"].google_appointments_tab
+    sheets.update_appointment_cancel_reason(tab, row_number, reason)

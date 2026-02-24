@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15,6 +16,7 @@ from app.sheets import SheetsClient
 from app.storage import SQLiteStateStore
 
 logger = logging.getLogger("golden-dent")
+_ADMIN_USERNAME = "GoldenDentNSK"
 
 
 def build_scheduler(data_dir: str, tz: str) -> AsyncIOScheduler:
@@ -43,71 +45,138 @@ def schedule_daily_messages(
     )
 
 
+def flush_undelivered_events(
+    sheets: SheetsClient,
+    undelivered_tab: str,
+    tz: str,
+    store: SQLiteStateStore,
+) -> None:
+    _flush_undelivered(sheets, undelivered_tab, ZoneInfo(tz), store)
+
+
 async def send_daily_messages(
-    bot, sheets: SheetsClient, tab_name: str, undelivered_tab: str, tz: str, store: SQLiteStateStore
+    bot,
+    sheets: SheetsClient,
+    tab_name: str,
+    undelivered_tab: str,
+    tz: str,
+    store: SQLiteStateStore,
 ) -> None:
     zone = ZoneInfo(tz)
     today = datetime.now(zone).date()
     tomorrow = today + timedelta(days=1)
+    _flush_undelivered(sheets, undelivered_tab, zone, store)
 
     for entry in sheets.iter_entries(tab_name):
         entry_date = entry.dt.date()
 
         if entry_date == tomorrow:
             await _send_appointment_message(
-                bot, sheets, undelivered_tab, entry.username, entry.dt, zone, store
+                bot=bot,
+                sheets=sheets,
+                appointments_tab=tab_name,
+                undelivered_tab=undelivered_tab,
+                username=entry.username,
+                dt=entry.dt,
+                row_number=entry.row_number,
+                zone=zone,
+                store=store,
+                kind="appointment",
+                text_prefix="Здравствуйте! Вы записаны на завтра",
             )
-            continue
 
-        if entry_date + relativedelta(months=+6) == today:
-            await _send_6m_message(bot, sheets, undelivered_tab, entry.username, zone, store)
+        if entry.surgeon_dt and entry.surgeon_dt.date() == tomorrow and entry.surgeon_dt != entry.dt:
+            await _send_appointment_message(
+                bot=bot,
+                sheets=sheets,
+                appointments_tab=tab_name,
+                undelivered_tab=undelivered_tab,
+                username=entry.username,
+                dt=entry.surgeon_dt,
+                row_number=entry.row_number,
+                zone=zone,
+                store=store,
+                kind="surgeon_appointment",
+                text_prefix="Здравствуйте! Вы записаны на плановый визит хирурга завтра",
+            )
+
+        if entry_date + relativedelta(months=+entry.reminder_months) == today:
+            await _send_periodic_message(
+                bot=bot,
+                sheets=sheets,
+                appointments_tab=tab_name,
+                undelivered_tab=undelivered_tab,
+                username=entry.username,
+                row_number=entry.row_number,
+                reminder_months=entry.reminder_months,
+                zone=zone,
+                store=store,
+            )
 
 
 async def _send_appointment_message(
     bot,
     sheets: SheetsClient,
+    appointments_tab: str,
     undelivered_tab: str,
     username: str,
     dt: datetime,
+    row_number: int,
     zone,
     store: SQLiteStateStore,
+    kind: str,
+    text_prefix: str,
 ) -> None:
     local_dt = dt.replace(tzinfo=zone) if dt.tzinfo is None else dt.astimezone(zone)
     date_str = local_dt.strftime("%d.%m.%Y")
     time_str = local_dt.strftime("%H:%M")
     text = (
-        "Здравствуйте! Вы записаны на завтра "
-        f"{date_str}г в клинику «Голден Дент» на прием в {time_str} 🕥"
+        f"{text_prefix} "
+        f"{date_str} г в клинику «Голден Дент» на прием в {time_str} 🕥"
     )
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Подтвердить запись", callback_data="confirm_appt")],
-            [InlineKeyboardButton("Перенести запись", url="https://t.me/GoldenDentNSK")],
+            [
+                InlineKeyboardButton(
+                    "Подтвердить запись",
+                    callback_data=f"confirm_appt:{row_number}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "Отменить запись",
+                    callback_data=f"cancel_appt:{row_number}",
+                )
+            ],
+            [InlineKeyboardButton("Перенести запись", url=_build_reschedule_url(local_dt))],
         ]
     )
     chat_id = store.get_chat_id(username)
     fallback = username if username.startswith("@") or username.isdigit() else f"@{username}"
     try:
         await bot.send_message(chat_id=chat_id or fallback, text=text, reply_markup=keyboard)
+        sheets.update_appointment_status(appointments_tab, row_number, "отправлено")
     except TelegramError as exc:
         logger.warning("Failed to send appointment to %s: %s", fallback, exc)
-        if "Chat not found" in str(exc):
-            _log_undelivered(
-                sheets,
-                undelivered_tab,
-                zone,
-                username,
-                "appointment",
-                str(exc),
-            )
-        return
+        _log_undelivered(
+            sheets=sheets,
+            undelivered_tab=undelivered_tab,
+            zone=zone,
+            store=store,
+            username=username,
+            kind=kind,
+            reason=str(exc),
+        )
 
 
-async def _send_6m_message(
+async def _send_periodic_message(
     bot,
     sheets: SheetsClient,
+    appointments_tab: str,
     undelivered_tab: str,
     username: str,
+    row_number: int,
+    reminder_months: int,
     zone,
     store: SQLiteStateStore,
 ) -> None:
@@ -115,27 +184,66 @@ async def _send_6m_message(
     fallback = username if username.startswith("@") or username.isdigit() else f"@{username}"
     try:
         await send_main_message(bot, chat_id or fallback)
+        sheets.update_appointment_status(appointments_tab, row_number, "отправлено")
+        if chat_id:
+            store.set_reminder_context(chat_id, row_number, datetime.now(zone))
     except TelegramError as exc:
-        logger.warning("Failed to send 6m reminder to %s: %s", fallback, exc)
-        if "Chat not found" in str(exc):
-            _log_undelivered(
-                sheets,
-                undelivered_tab,
-                zone,
-                username,
-                "6m",
-                str(exc),
-            )
-        return
+        logger.warning("Failed to send periodic reminder to %s: %s", fallback, exc)
+        _log_undelivered(
+            sheets=sheets,
+            undelivered_tab=undelivered_tab,
+            zone=zone,
+            store=store,
+            username=username,
+            kind=f"{reminder_months}m",
+            reason=str(exc),
+        )
+
+
+def _build_reschedule_url(dt: datetime) -> str:
+    date_str = dt.strftime("%d.%m.%Y")
+    text = f"Здравствуйте! Хочу перенести мою запись {date_str}"
+    return f"https://t.me/{_ADMIN_USERNAME}?text={quote(text)}"
 
 
 def _log_undelivered(
     sheets: SheetsClient,
     undelivered_tab: str,
     zone,
+    store: SQLiteStateStore,
     username: str,
     kind: str,
     reason: str,
 ) -> None:
-    now_str = datetime.now(zone).strftime("%d.%m.%Y %H:%M")
-    sheets.append_undelivered(undelivered_tab, [now_str, username, kind, reason])
+    store.add_undelivered_event(datetime.now(zone), username, kind, reason)
+    _flush_undelivered(sheets, undelivered_tab, zone, store)
+
+
+def _flush_undelivered(
+    sheets: SheetsClient,
+    undelivered_tab: str,
+    zone,
+    store: SQLiteStateStore,
+) -> None:
+    events = store.list_unexported_undelivered(limit=500)
+    if not events:
+        return
+
+    exported_at = datetime.now(zone)
+    for event in events:
+        try:
+            created = datetime.fromisoformat(event.created_at)
+            created_local = created.replace(tzinfo=zone) if created.tzinfo is None else created.astimezone(zone)
+            sheets.append_undelivered(
+                undelivered_tab,
+                [
+                    created_local.strftime("%d.%m.%Y %H:%M"),
+                    event.username,
+                    event.kind,
+                    event.reason,
+                ],
+            )
+            store.mark_undelivered_exported(event.id, exported_at)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to flush undelivered event %s: %s", event.id, exc)
+            break

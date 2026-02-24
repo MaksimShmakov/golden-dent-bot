@@ -5,7 +5,11 @@ from fastapi import FastAPI, HTTPException, Request
 from telegram import Update
 
 from app.config import Settings
-from app.scheduler import build_scheduler, schedule_daily_messages
+from app.scheduler import (
+    build_scheduler,
+    flush_undelivered_events,
+    schedule_daily_messages,
+)
 from app.sheets import SheetsClient
 from app.storage import SQLiteStateStore
 from app.telegram_bot import build_application
@@ -21,9 +25,9 @@ async def lifespan(app: FastAPI):
     app.state.sheets = SheetsClient(config.google_sheet_id, config.google_service_account_json)
     app.state.store = SQLiteStateStore(config.data_dir)
     try:
-        app.state.sheets.sync_client_usernames(
+        app.state.sheets.sync_clients(
             config.google_clients_tab,
-            app.state.store.list_client_usernames(),
+            app.state.store.list_clients(),
         )
     except Exception as exc:
         logger.warning(
@@ -72,6 +76,12 @@ async def lifespan(app: FastAPI):
         config.tz,
         config.daily_reminder_hour,
         config.daily_reminder_minute,
+        app.state.store,
+    )
+    flush_undelivered_events(
+        app.state.sheets,
+        config.google_undelivered_tab,
+        config.tz,
         app.state.store,
     )
     app.state.scheduler.start()

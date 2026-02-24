@@ -6,11 +6,18 @@ from datetime import datetime
 
 import gspread
 
+from app.storage import ClientProfile
+
 
 @dataclass
 class SheetEntry:
+    row_number: int
     dt: datetime
     username: str
+    status: str
+    cancel_reason: str
+    reminder_months: int
+    surgeon_dt: datetime | None
 
 
 class SheetsClient:
@@ -27,29 +34,96 @@ class SheetsClient:
         ws.append_row(row, value_input_option="USER_ENTERED")
 
     def sync_client_usernames(self, tab_name: str, usernames: list[str]) -> None:
-        ws = self._sheet.worksheet(tab_name)
-        existing = ws.col_values(1)
-        header = existing[0].strip() if existing and existing[0].strip() else "tg_username"
-
         unique_usernames = sorted(
             {username.strip().lower() for username in usernames if username.strip()}
         )
-        target = [header, *unique_usernames]
-        if existing == target:
+        clients = [
+            ClientProfile(
+                user_id=-index,
+                username=username,
+                full_name="",
+                phone="",
+                updated_at="",
+            )
+            for index, username in enumerate(unique_usernames, start=1)
+        ]
+        self.sync_clients(tab_name, clients)
+
+    def sync_clients(self, tab_name: str, clients: list[ClientProfile]) -> None:
+        ws = self._sheet.worksheet(tab_name)
+        existing_rows = ws.get_all_values()
+        default_header = ["tg_username", "fio", "phone", "tg_user_id"]
+
+        if existing_rows:
+            existing_header = (existing_rows[0] + ["", "", "", ""])[:4]
+            header = [
+                existing_header[0].strip() or default_header[0],
+                existing_header[1].strip() or default_header[1],
+                existing_header[2].strip() or default_header[2],
+                existing_header[3].strip() or default_header[3],
+            ]
+        else:
+            header = default_header
+
+        unique_clients: dict[int, ClientProfile] = {}
+        for client in clients:
+            unique_clients[client.user_id] = client
+        sorted_clients = sorted(
+            unique_clients.values(),
+            key=lambda item: (item.username == "", item.username, item.user_id),
+        )
+
+        target_rows = [header]
+        for client in sorted_clients:
+            target_rows.append(
+                [
+                    client.username,
+                    client.full_name,
+                    client.phone,
+                    str(client.user_id) if client.user_id else "",
+                ]
+            )
+
+        existing_projection = [
+            (row + ["", "", "", ""])[:4] for row in existing_rows
+        ]
+        if existing_projection == target_rows:
             return
 
         ws.update(
-            f"A1:A{len(target)}",
-            [[value] for value in target],
+            f"A1:D{len(target_rows)}",
+            target_rows,
             value_input_option="USER_ENTERED",
         )
-        if len(existing) > len(target):
-            ws.batch_clear([f"A{len(target) + 1}:A{len(existing)}"])
+        if len(existing_projection) > len(target_rows):
+            ws.batch_clear([f"A{len(target_rows) + 1}:D{len(existing_projection)}"])
+
+    def update_appointment_status(self, tab_name: str, row_number: int, status: str) -> None:
+        if row_number < 2:
+            return
+        ws = self._sheet.worksheet(tab_name)
+        ws.update(
+            f"C{row_number}:C{row_number}",
+            [[status]],
+            value_input_option="USER_ENTERED",
+        )
+
+    def update_appointment_cancel_reason(
+        self, tab_name: str, row_number: int, reason: str
+    ) -> None:
+        if row_number < 2:
+            return
+        ws = self._sheet.worksheet(tab_name)
+        ws.update(
+            f"D{row_number}:D{row_number}",
+            [[reason]],
+            value_input_option="USER_ENTERED",
+        )
 
     def iter_entries(self, tab_name: str) -> Iterable[SheetEntry]:
         ws = self._sheet.worksheet(tab_name)
         rows = ws.get_all_values()
-        for row in rows[1:]:
+        for row_number, row in enumerate(rows[1:], start=2):
             if not row or not row[0].strip():
                 continue
             dt = _parse_datetime(row[0].strip())
@@ -58,7 +132,19 @@ class SheetsClient:
             username = row[1].strip() if len(row) > 1 else ""
             if not username:
                 continue
-            yield SheetEntry(dt=dt, username=username)
+            status = row[2].strip() if len(row) > 2 else ""
+            cancel_reason = row[3].strip() if len(row) > 3 else ""
+            reminder_months = _parse_reminder_months(row[4].strip() if len(row) > 4 else "")
+            surgeon_dt = _parse_datetime(row[5].strip()) if len(row) > 5 and row[5].strip() else None
+            yield SheetEntry(
+                row_number=row_number,
+                dt=dt,
+                username=username,
+                status=status,
+                cancel_reason=cancel_reason,
+                reminder_months=reminder_months,
+                surgeon_dt=surgeon_dt,
+            )
 
 
 def _parse_datetime(value: str) -> datetime | None:
@@ -68,3 +154,16 @@ def _parse_datetime(value: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _parse_reminder_months(value: str) -> int:
+    cleaned = value.strip()
+    if not cleaned:
+        return 6
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    if not digits:
+        return 6
+    months = int(digits)
+    if months <= 0:
+        return 6
+    return months
