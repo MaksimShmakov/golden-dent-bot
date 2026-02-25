@@ -144,29 +144,60 @@ async def test_daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     tab = context.application.bot_data["config"].google_appointments_tab
     undelivered_tab = context.application.bot_data["config"].google_undelivered_tab
     store: SQLiteStateStore = context.application.bot_data["store"]
-    stats = await send_daily_messages(
-        context.bot,
-        sheets,
-        tab,
-        undelivered_tab,
-        tz,
-        store,
-        appointment_days_ahead=0,
-    )
+    zone = ZoneInfo(tz)
+    days_ahead = _parse_test_daily_days_ahead(context.args)
+    target_date = (datetime.now(zone).date() + timedelta(days=days_ahead)).strftime("%d.%m.%Y")
+    try:
+        stats = await send_daily_messages(
+            context.bot,
+            sheets,
+            tab,
+            undelivered_tab,
+            tz,
+            store,
+            appointment_days_ahead=days_ahead,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("test_daily failed")
+        if update.effective_chat:
+            await update.effective_chat.send_message(
+                f"Ошибка /test_daily: {type(exc).__name__}: {exc}"
+            )
+        return
     if update.effective_chat:
         await update.effective_chat.send_message(
             "\n".join(
                 [
-                    "Тест ежедневной рассылки завершен.",
-                    f"Строк обработано: {stats['rows_total']}",
-                    f"Кандидаты (запись на завтра): {stats['appointment_candidates']}",
-                    f"Кандидаты (хирург на завтра): {stats['surgeon_candidates']}",
-                    f"Кандидаты (периодические): {stats['periodic_candidates']}",
-                    f"Успешно отправлено: {stats['sent']}",
-                    f"Ошибок отправки: {stats['failed']}",
+                    "РўРµСЃС‚ РµР¶РµРґРЅРµРІРЅРѕР№ СЂР°СЃСЃС‹Р»РєРё Р·Р°РІРµСЂС€РµРЅ.",
+                    f"Целевая дата: {target_date} (смещение: {days_ahead})",
+                    f"РЎС‚СЂРѕРє РѕР±СЂР°Р±РѕС‚Р°РЅРѕ: {stats['rows_total']}",
+                    f"РљР°РЅРґРёРґР°С‚С‹ (Р·Р°РїРёСЃСЊ РЅР° Р·Р°РІС‚СЂР°): {stats['appointment_candidates']}",
+                    f"РљР°РЅРґРёРґР°С‚С‹ (С…РёСЂСѓСЂРі РЅР° Р·Р°РІС‚СЂР°): {stats['surgeon_candidates']}",
+                    f"РљР°РЅРґРёРґР°С‚С‹ (РїРµСЂРёРѕРґРёС‡РµСЃРєРёРµ): {stats['periodic_candidates']}",
+                    f"РЈСЃРїРµС€РЅРѕ РѕС‚РїСЂР°РІР»РµРЅРѕ: {stats['sent']}",
+                    f"РћС€РёР±РѕРє РѕС‚РїСЂР°РІРєРё: {stats['failed']}",
                 ]
             )
         )
+
+
+def _parse_test_daily_days_ahead(args: list[str]) -> int:
+    if not args:
+        return 1
+    value = args[0].strip().lower()
+    aliases = {
+        "today": 0,
+        "сегодня": 0,
+        "tomorrow": 1,
+        "завтра": 1,
+    }
+    if value in aliases:
+        return aliases[value]
+    if value.startswith("+"):
+        value = value[1:]
+    if value.isdigit():
+        return int(value)
+    return 1
 
 
 async def test_daily_debug_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
