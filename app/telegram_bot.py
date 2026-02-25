@@ -144,7 +144,15 @@ async def test_daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     tab = context.application.bot_data["config"].google_appointments_tab
     undelivered_tab = context.application.bot_data["config"].google_undelivered_tab
     store: SQLiteStateStore = context.application.bot_data["store"]
-    stats = await send_daily_messages(context.bot, sheets, tab, undelivered_tab, tz, store)
+    stats = await send_daily_messages(
+        context.bot,
+        sheets,
+        tab,
+        undelivered_tab,
+        tz,
+        store,
+        appointment_days_ahead=0,
+    )
     if update.effective_chat:
         await update.effective_chat.send_message(
             "\n".join(

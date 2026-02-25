@@ -61,10 +61,11 @@ async def send_daily_messages(
     undelivered_tab: str,
     tz: str,
     store: SQLiteStateStore,
+    appointment_days_ahead: int = 1,
 ) -> dict[str, int]:
     zone = ZoneInfo(tz)
     today = datetime.now(zone).date()
-    tomorrow = today + timedelta(days=1)
+    target_date = today + timedelta(days=appointment_days_ahead)
     _flush_undelivered(sheets, undelivered_tab, zone, store)
     stats = {
         "rows_total": 0,
@@ -79,7 +80,7 @@ async def send_daily_messages(
         stats["rows_total"] += 1
         entry_date = entry.dt.date()
 
-        if entry_date == tomorrow:
+        if entry_date == target_date:
             stats["appointment_candidates"] += 1
             sent = await _send_appointment_message(
                 bot=bot,
@@ -97,7 +98,11 @@ async def send_daily_messages(
             stats["sent"] += int(sent)
             stats["failed"] += int(not sent)
 
-        if entry.surgeon_dt and entry.surgeon_dt.date() == tomorrow and entry.surgeon_dt != entry.dt:
+        if (
+            entry.surgeon_dt
+            and entry.surgeon_dt.date() == target_date
+            and entry.surgeon_dt != entry.dt
+        ):
             stats["surgeon_candidates"] += 1
             sent = await _send_appointment_message(
                 bot=bot,
