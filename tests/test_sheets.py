@@ -22,3 +22,8 @@ def test_parse_reminder_months_defaults_to_six():
 def test_parse_reminder_months_with_value():
     assert _parse_reminder_months("3") == 3
     assert _parse_reminder_months("6 мес") == 6
+
+
+def test_parse_reminder_months_with_invalid_large_value_defaults_to_six():
+    assert _parse_reminder_months("26022026") == 6
+    assert _parse_reminder_months("999999999999") == 6

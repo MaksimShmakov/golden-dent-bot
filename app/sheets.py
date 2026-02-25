@@ -164,6 +164,7 @@ def _parse_reminder_months(value: str) -> int:
     if not digits:
         return 6
     months = int(digits)
-    if months <= 0:
+    # Guard against wrong columns/dirty values like dates or phone numbers.
+    if months <= 0 or months > 120:
         return 6
     return months

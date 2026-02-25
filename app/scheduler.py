@@ -120,7 +120,17 @@ async def send_daily_messages(
             stats["sent"] += int(sent)
             stats["failed"] += int(not sent)
 
-        if entry_date + relativedelta(months=+entry.reminder_months) == today:
+        try:
+            periodic_due = entry_date + relativedelta(months=+entry.reminder_months) == today
+        except OverflowError:
+            logger.warning(
+                "Skip periodic reminder for row %s: invalid reminder_months=%s",
+                entry.row_number,
+                entry.reminder_months,
+            )
+            periodic_due = False
+
+        if periodic_due:
             stats["periodic_candidates"] += 1
             sent = await _send_periodic_message(
                 bot=bot,

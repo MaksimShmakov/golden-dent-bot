@@ -134,3 +134,39 @@ def test_send_daily_messages_can_target_today():
     assert stats["sent"] == 1
     assert len(bot.sent_messages) == 1
     assert sheets.status_updates == [("appointments", 2, "отправлено")]
+
+
+def test_send_daily_messages_skips_periodic_overflow_months():
+    zone = ZoneInfo("Asia/Novosibirsk")
+    today = datetime.now(zone).date()
+    dt = datetime.combine(today - timedelta(days=1), time(10, 0))
+    sheets = FakeSheets(
+        [
+            SheetEntry(
+                row_number=2,
+                dt=dt,
+                username="@testuser",
+                status="",
+                cancel_reason="",
+                reminder_months=10**12,
+                surgeon_dt=None,
+            )
+        ]
+    )
+    bot = FakeBot()
+    store = FakeStore()
+
+    stats = asyncio.run(
+        send_daily_messages(
+            bot,
+            sheets,
+            "appointments",
+            "undelivered",
+            "Asia/Novosibirsk",
+            store,
+        )
+    )
+
+    assert stats["rows_total"] == 1
+    assert stats["periodic_candidates"] == 0
+    assert stats["failed"] == 0
