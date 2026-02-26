@@ -6,13 +6,14 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 logger = logging.getLogger("golden-dent")
 
-MAIN_MESSAGE = (
+_MAIN_MESSAGE_TEMPLATE = (
     "Здравствуйте!\n\n"
     "Вас приветствует клиника «Голден Дент».\n\n"
-    "С момента вашего последнего визита прошло 6 месяцев — это оптимальное время "
+    "С момента вашего последнего визита прошло {months} месяцев — это оптимальное время "
     "для профилактического осмотра и профессиональной гигиены.\n\n"
     "Будем рады видеть вас!"
 )
+MAIN_MESSAGE = _MAIN_MESSAGE_TEMPLATE.format(months=6)
 
 START_MESSAGE = (
     "Здравствуйте! Вас приветствует клиника Голден Дент!\n\n"
@@ -217,8 +218,9 @@ def build_flash_contact_keyboard() -> InlineKeyboardMarkup:
     return _build_offer_actions_keyboard(FLASH_CONTACT_URL)
 
 
-async def send_main_message(bot, chat_id: int) -> None:
-    await bot.send_message(chat_id=chat_id, text=MAIN_MESSAGE, reply_markup=build_main_keyboard())
+async def send_main_message(bot, chat_id: int, reminder_months: int = 6) -> None:
+    text = _MAIN_MESSAGE_TEMPLATE.format(months=reminder_months)
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=build_main_keyboard())
 
 
 async def send_start_message(bot, chat_id: int) -> None:

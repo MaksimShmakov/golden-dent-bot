@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
+
+from dateutil.relativedelta import relativedelta
 
 from app.scheduler import send_daily_messages
 from app.sheets import SheetEntry
@@ -18,13 +22,19 @@ class FakeBot:
 class FakeSheets:
     def __init__(self, entries: list[SheetEntry]) -> None:
         self._entries = entries
-        self.status_updates: list[tuple[str, int, str]] = []
+        self.status_updates: list[tuple[str, int, str, str]] = []
 
     def iter_entries(self, tab_name: str):  # noqa: ANN201
         return iter(self._entries)
 
-    def update_appointment_status(self, tab_name: str, row_number: int, status: str) -> None:
-        self.status_updates.append((tab_name, row_number, status))
+    def update_appointment_status(
+        self,
+        tab_name: str,
+        row_number: int,
+        status: str,
+        status_column: str = "C",
+    ) -> None:
+        self.status_updates.append((tab_name, row_number, status, status_column))
 
     def append_undelivered(self, tab_name: str, row: list[str]) -> None:  # noqa: ARG002
         return
@@ -42,13 +52,19 @@ class _UndeliveredEvent:
 
 class FakeStore:
     def __init__(self) -> None:
-        self.reminder_context: tuple[int, int] | None = None
+        self.reminder_context: tuple[int, int, str] | None = None
 
     def get_chat_id(self, username: str) -> int:  # noqa: ARG002
         return 10001
 
-    def set_reminder_context(self, chat_id: int, appointment_row: int, updated_at: datetime) -> None:  # noqa: ARG002,E501
-        self.reminder_context = (chat_id, appointment_row)
+    def set_reminder_context(
+        self,
+        chat_id: int,
+        appointment_row: int,
+        updated_at: datetime,
+        status_column: str = "C",
+    ) -> None:  # noqa: ARG002,E501
+        self.reminder_context = (chat_id, appointment_row, status_column)
 
     def add_undelivered_event(
         self, created_at: datetime, username: str, kind: str, reason: str  # noqa: ARG002
@@ -102,7 +118,7 @@ def test_send_daily_messages_defaults_to_tomorrow():
     assert stats["appointment_candidates"] == 1
     assert stats["sent"] == 1
     assert len(bot.sent_messages) == 1
-    assert sheets.status_updates == [("appointments", 3, "отправлено")]
+    assert sheets.status_updates == [("appointments", 3, "отправлено", "C")]
 
 
 def test_send_daily_messages_can_target_today():
@@ -133,7 +149,7 @@ def test_send_daily_messages_can_target_today():
     assert stats["appointment_candidates"] == 1
     assert stats["sent"] == 1
     assert len(bot.sent_messages) == 1
-    assert sheets.status_updates == [("appointments", 2, "отправлено")]
+    assert sheets.status_updates == [("appointments", 2, "отправлено", "C")]
 
 
 def test_send_daily_messages_skips_periodic_overflow_months():
@@ -170,3 +186,45 @@ def test_send_daily_messages_skips_periodic_overflow_months():
     assert stats["rows_total"] == 1
     assert stats["periodic_candidates"] == 0
     assert stats["failed"] == 0
+
+
+def test_send_daily_messages_uses_periodic_column_for_three_months():
+    zone = ZoneInfo("Asia/Novosibirsk")
+    today = datetime.now(zone).date()
+    periodic_dt = datetime.combine(today - relativedelta(months=3), time(10, 0))
+    sheets = FakeSheets(
+        [
+            SheetEntry(
+                row_number=7,
+                dt=periodic_dt,
+                username="@testuser",
+                status="",
+                cancel_reason="",
+                reminder_months=3,
+                surgeon_dt=None,
+                status_column="G",
+                entry_kind="periodic",
+            )
+        ]
+    )
+    bot = FakeBot()
+    store = FakeStore()
+
+    stats = asyncio.run(
+        send_daily_messages(
+            bot,
+            sheets,
+            "appointments",
+            "undelivered",
+            "Asia/Novosibirsk",
+            store,
+        )
+    )
+
+    assert stats["rows_total"] == 1
+    assert stats["periodic_candidates"] == 1
+    assert stats["sent"] == 1
+    assert sheets.status_updates == [("appointments", 7, "отправлено", "G")]
+    assert len(bot.sent_messages) == 1
+    assert "3 месяцев" in bot.sent_messages[0][1]
+    assert store.reminder_context == (10001, 7, "G")

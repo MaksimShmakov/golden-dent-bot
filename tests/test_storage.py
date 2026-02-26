@@ -45,8 +45,9 @@ def test_reminder_context_and_undelivered_events(tmp_path):
     store = SQLiteStateStore(str(tmp_path))
     now = datetime(2026, 2, 11, 10, 0, 0)
 
-    store.set_reminder_context(chat_id=1001, appointment_row=12, updated_at=now)
+    store.set_reminder_context(chat_id=1001, appointment_row=12, updated_at=now, status_column="L")
     assert store.get_reminder_context(1001) == 12
+    assert store.get_reminder_context_target(1001) == (12, "L")
 
     event_id = store.add_undelivered_event(
         created_at=now,
@@ -74,8 +75,9 @@ def test_reset_user_state_clears_user_related_data(tmp_path):
         username="@user42",
         created_at=now,
         action_type="collect_full_name",
+        status_column="G",
     )
-    store.set_reminder_context(chat_id=42, appointment_row=12, updated_at=now)
+    store.set_reminder_context(chat_id=42, appointment_row=12, updated_at=now, status_column="G")
     assert store.mark_activated(42, now) is True
 
     stats = store.reset_user_state(user_id=42, chat_id=42, username="User42")

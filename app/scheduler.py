@@ -80,7 +80,7 @@ async def send_daily_messages(
         stats["rows_total"] += 1
         entry_date = entry.dt.date()
 
-        if entry_date == target_date:
+        if entry.entry_kind == "appointment" and entry_date == target_date:
             stats["appointment_candidates"] += 1
             sent = await _send_appointment_message(
                 bot=bot,
@@ -94,12 +94,14 @@ async def send_daily_messages(
                 store=store,
                 kind="appointment",
                 text_prefix="Здравствуйте! Вы записаны на завтра",
+                status_column=entry.status_column,
             )
             stats["sent"] += int(sent)
             stats["failed"] += int(not sent)
 
         if (
-            entry.surgeon_dt
+            entry.entry_kind == "appointment"
+            and entry.surgeon_dt
             and entry.surgeon_dt.date() == target_date
             and entry.surgeon_dt != entry.dt
         ):
@@ -116,12 +118,16 @@ async def send_daily_messages(
                 store=store,
                 kind="surgeon_appointment",
                 text_prefix="Здравствуйте! Вы записаны на плановый визит хирурга завтра",
+                status_column=entry.status_column,
             )
             stats["sent"] += int(sent)
             stats["failed"] += int(not sent)
 
         try:
-            periodic_due = entry_date + relativedelta(months=+entry.reminder_months) == today
+            periodic_due = (
+                entry.reminder_months > 0
+                and entry_date + relativedelta(months=+entry.reminder_months) == today
+            )
         except OverflowError:
             logger.warning(
                 "Skip periodic reminder for row %s: invalid reminder_months=%s",
@@ -142,6 +148,7 @@ async def send_daily_messages(
                 reminder_months=entry.reminder_months,
                 zone=zone,
                 store=store,
+                status_column=entry.status_column,
             )
             stats["sent"] += int(sent)
             stats["failed"] += int(not sent)
@@ -161,6 +168,7 @@ async def _send_appointment_message(
     store: SQLiteStateStore,
     kind: str,
     text_prefix: str,
+    status_column: str,
 ) -> bool:
     local_dt = dt.replace(tzinfo=zone) if dt.tzinfo is None else dt.astimezone(zone)
     date_str = local_dt.strftime("%d.%m.%Y")
@@ -190,7 +198,12 @@ async def _send_appointment_message(
     fallback = username if username.startswith("@") or username.isdigit() else f"@{username}"
     try:
         await bot.send_message(chat_id=chat_id or fallback, text=text, reply_markup=keyboard)
-        sheets.update_appointment_status(appointments_tab, row_number, "отправлено")
+        sheets.update_appointment_status(
+            appointments_tab,
+            row_number,
+            "отправлено",
+            status_column,
+        )
         return True
     except TelegramError as exc:
         logger.warning("Failed to send appointment to %s: %s", fallback, exc)
@@ -216,14 +229,25 @@ async def _send_periodic_message(
     reminder_months: int,
     zone,
     store: SQLiteStateStore,
+    status_column: str,
 ) -> bool:
     chat_id = store.get_chat_id(username)
     fallback = username if username.startswith("@") or username.isdigit() else f"@{username}"
     try:
-        await send_main_message(bot, chat_id or fallback)
-        sheets.update_appointment_status(appointments_tab, row_number, "отправлено")
+        await send_main_message(bot, chat_id or fallback, reminder_months=reminder_months)
+        sheets.update_appointment_status(
+            appointments_tab,
+            row_number,
+            "отправлено",
+            status_column,
+        )
         if chat_id:
-            store.set_reminder_context(chat_id, row_number, datetime.now(zone))
+            store.set_reminder_context(
+                chat_id,
+                row_number,
+                datetime.now(zone),
+                status_column=status_column,
+            )
         return True
     except TelegramError as exc:
         logger.warning("Failed to send periodic reminder to %s: %s", fallback, exc)

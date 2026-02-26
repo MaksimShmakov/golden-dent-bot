@@ -18,6 +18,8 @@ class SheetEntry:
     cancel_reason: str
     reminder_months: int
     surgeon_dt: datetime | None
+    status_column: str = "C"
+    entry_kind: str = "appointment"
 
 
 class SheetsClient:
@@ -98,12 +100,19 @@ class SheetsClient:
         if len(existing_projection) > len(target_rows):
             ws.batch_clear([f"A{len(target_rows) + 1}:D{len(existing_projection)}"])
 
-    def update_appointment_status(self, tab_name: str, row_number: int, status: str) -> None:
+    def update_appointment_status(
+        self,
+        tab_name: str,
+        row_number: int,
+        status: str,
+        status_column: str = "C",
+    ) -> None:
         if row_number < 2:
             return
+        column = _normalize_status_column(status_column)
         ws = self._sheet.worksheet(tab_name)
         ws.update(
-            f"C{row_number}:C{row_number}",
+            f"{column}{row_number}:{column}{row_number}",
             [[status]],
             value_input_option="USER_ENTERED",
         )
@@ -123,28 +132,126 @@ class SheetsClient:
     def iter_entries(self, tab_name: str) -> Iterable[SheetEntry]:
         ws = self._sheet.worksheet(tab_name)
         rows = ws.get_all_values()
-        for row_number, row in enumerate(rows[1:], start=2):
-            if not row or not row[0].strip():
-                continue
-            dt = _parse_datetime(row[0].strip())
-            if not dt:
-                continue
-            username = row[1].strip() if len(row) > 1 else ""
-            if not username:
-                continue
-            status = row[2].strip() if len(row) > 2 else ""
-            cancel_reason = row[3].strip() if len(row) > 3 else ""
-            reminder_months = _parse_reminder_months(row[4].strip() if len(row) > 4 else "")
-            surgeon_dt = _parse_datetime(row[5].strip()) if len(row) > 5 and row[5].strip() else None
-            yield SheetEntry(
-                row_number=row_number,
-                dt=dt,
-                username=username,
-                status=status,
-                cancel_reason=cancel_reason,
-                reminder_months=reminder_months,
-                surgeon_dt=surgeon_dt,
-            )
+        yield from _iter_sheet_entries(rows)
+
+
+def _iter_sheet_entries(rows: list[list[str]]) -> Iterable[SheetEntry]:
+    for row_number, row in enumerate(rows[1:], start=2):
+        appointment_entry = _build_appointment_entry(row_number, row)
+        if appointment_entry:
+            yield appointment_entry
+
+        periodic_3m = _build_periodic_entry(
+            row_number=row_number,
+            row=row,
+            date_index=4,
+            username_index=5,
+            status_index=6,
+            reminder_months=3,
+            status_column="G",
+        )
+        if periodic_3m:
+            yield periodic_3m
+
+        periodic_6m = _build_periodic_entry(
+            row_number=row_number,
+            row=row,
+            date_index=9,
+            username_index=10,
+            status_index=11,
+            reminder_months=6,
+            status_column="L",
+        )
+        if periodic_6m:
+            yield periodic_6m
+
+
+def _build_appointment_entry(row_number: int, row: list[str]) -> SheetEntry | None:
+    date_raw = _cell_value(row, 0)
+    dt = _parse_datetime(date_raw) if date_raw else None
+    if not dt:
+        return None
+
+    username = _cell_value(row, 1)
+    if not username:
+        return None
+
+    reminder_months = _parse_explicit_reminder_months(_cell_value(row, 4))
+    surgeon_raw = _cell_value(row, 5)
+    surgeon_dt = _parse_datetime(surgeon_raw) if surgeon_raw else None
+
+    return SheetEntry(
+        row_number=row_number,
+        dt=dt,
+        username=username,
+        status=_cell_value(row, 2),
+        cancel_reason=_cell_value(row, 3),
+        reminder_months=reminder_months,
+        surgeon_dt=surgeon_dt,
+        status_column="C",
+        entry_kind="appointment",
+    )
+
+
+def _build_periodic_entry(
+    row_number: int,
+    row: list[str],
+    date_index: int,
+    username_index: int,
+    status_index: int,
+    reminder_months: int,
+    status_column: str,
+) -> SheetEntry | None:
+    date_raw = _cell_value(row, date_index)
+    dt = _parse_datetime(date_raw) if date_raw else None
+    if not dt:
+        return None
+
+    username = _cell_value(row, username_index)
+    if not username:
+        return None
+
+    return SheetEntry(
+        row_number=row_number,
+        dt=dt,
+        username=username,
+        status=_cell_value(row, status_index),
+        cancel_reason="",
+        reminder_months=reminder_months,
+        surgeon_dt=None,
+        status_column=status_column,
+        entry_kind="periodic",
+    )
+
+
+def _cell_value(row: list[str], index: int) -> str:
+    if len(row) <= index:
+        return ""
+    return row[index].strip()
+
+
+def _parse_explicit_reminder_months(value: str) -> int:
+    cleaned = value.strip()
+    if not cleaned:
+        return 0
+    if _parse_datetime(cleaned):
+        return 0
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    if not digits:
+        return 0
+    months = int(digits)
+    if months <= 0 or months > 120:
+        return 0
+    return months
+
+
+def _normalize_status_column(status_column: str | None) -> str:
+    if not status_column:
+        return "C"
+    normalized = status_column.strip().upper()
+    if not normalized or not normalized.isalpha():
+        return "C"
+    return normalized
 
 
 def _parse_datetime(value: str) -> datetime | None:

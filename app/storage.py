@@ -13,6 +13,7 @@ class PendingAction:
     username: str
     action_type: str
     appointment_row: int | None
+    status_column: str
     created_at: str
 
 
@@ -53,6 +54,7 @@ class SQLiteStateStore:
                     username TEXT NOT NULL,
                     action_type TEXT NOT NULL DEFAULT 'not_ready_comment',
                     appointment_row INTEGER,
+                    status_column TEXT NOT NULL DEFAULT 'C',
                     created_at TEXT NOT NULL
                 )
                 """
@@ -102,12 +104,14 @@ class SQLiteStateStore:
                 CREATE TABLE IF NOT EXISTS reminder_context (
                     chat_id INTEGER PRIMARY KEY,
                     appointment_row INTEGER NOT NULL,
+                    status_column TEXT NOT NULL DEFAULT 'C',
                     updated_at TEXT NOT NULL
                 )
                 """
             )
             self._migrate_pending_comment_schema(conn)
             self._migrate_client_map_schema(conn)
+            self._migrate_reminder_context_schema(conn)
             self._migrate_clients_from_user_map(conn)
             conn.commit()
 
@@ -123,6 +127,10 @@ class SQLiteStateStore:
             )
         if "appointment_row" not in columns:
             conn.execute("ALTER TABLE pending_comment ADD COLUMN appointment_row INTEGER")
+        if "status_column" not in columns:
+            conn.execute(
+                "ALTER TABLE pending_comment ADD COLUMN status_column TEXT NOT NULL DEFAULT 'C'"
+            )
 
     def _migrate_client_map_schema(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(client_map)").fetchall()}
@@ -130,6 +138,13 @@ class SQLiteStateStore:
             conn.execute("ALTER TABLE client_map ADD COLUMN full_name TEXT NOT NULL DEFAULT ''")
         if "phone" not in columns:
             conn.execute("ALTER TABLE client_map ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
+
+    def _migrate_reminder_context_schema(self, conn: sqlite3.Connection) -> None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(reminder_context)").fetchall()}
+        if "status_column" not in columns:
+            conn.execute(
+                "ALTER TABLE reminder_context ADD COLUMN status_column TEXT NOT NULL DEFAULT 'C'"
+            )
 
     def _migrate_clients_from_user_map(self, conn: sqlite3.Connection) -> None:
         cur = conn.execute(
@@ -154,19 +169,36 @@ class SQLiteStateStore:
         created_at: datetime,
         action_type: str = "not_ready_comment",
         appointment_row: int | None = None,
+        status_column: str = "C",
     ) -> None:
+        normalized_status_column = _normalize_status_column(status_column)
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO pending_comment (user_id, username, action_type, appointment_row, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO pending_comment (
+                    user_id,
+                    username,
+                    action_type,
+                    appointment_row,
+                    status_column,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     username=excluded.username,
                     action_type=excluded.action_type,
                     appointment_row=excluded.appointment_row,
+                    status_column=excluded.status_column,
                     created_at=excluded.created_at
                 """,
-                (user_id, username, action_type, appointment_row, created_at.isoformat()),
+                (
+                    user_id,
+                    username,
+                    action_type,
+                    appointment_row,
+                    normalized_status_column,
+                    created_at.isoformat(),
+                ),
             )
             conn.commit()
 
@@ -174,7 +206,7 @@ class SQLiteStateStore:
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                SELECT user_id, username, action_type, appointment_row, created_at
+                SELECT user_id, username, action_type, appointment_row, status_column, created_at
                 FROM pending_comment
                 WHERE user_id=?
                 """,
@@ -190,14 +222,15 @@ class SQLiteStateStore:
             username=row[1],
             action_type=row[2],
             appointment_row=row[3],
-            created_at=row[4],
+            status_column=row[4],
+            created_at=row[5],
         )
 
     def list_pending(self) -> Iterable[PendingAction]:
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                SELECT user_id, username, action_type, appointment_row, created_at
+                SELECT user_id, username, action_type, appointment_row, status_column, created_at
                 FROM pending_comment
                 ORDER BY created_at
                 """
@@ -209,7 +242,8 @@ class SQLiteStateStore:
                 username=row[1],
                 action_type=row[2],
                 appointment_row=row[3],
-                created_at=row[4],
+                status_column=row[4],
+                created_at=row[5],
             )
             for row in rows
         ]
@@ -450,28 +484,37 @@ class SQLiteStateStore:
         chat_id: int,
         appointment_row: int,
         updated_at: datetime,
+        status_column: str = "C",
     ) -> None:
+        normalized_status_column = _normalize_status_column(status_column)
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO reminder_context (chat_id, appointment_row, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO reminder_context (chat_id, appointment_row, status_column, updated_at)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     appointment_row=excluded.appointment_row,
+                    status_column=excluded.status_column,
                     updated_at=excluded.updated_at
                 """,
-                (chat_id, appointment_row, updated_at.isoformat()),
+                (chat_id, appointment_row, normalized_status_column, updated_at.isoformat()),
             )
             conn.commit()
 
     def get_reminder_context(self, chat_id: int) -> int | None:
+        target = self.get_reminder_context_target(chat_id)
+        return target[0] if target else None
+
+    def get_reminder_context_target(self, chat_id: int) -> tuple[int, str] | None:
         with self._connect() as conn:
             cur = conn.execute(
-                "SELECT appointment_row FROM reminder_context WHERE chat_id=?",
+                "SELECT appointment_row, status_column FROM reminder_context WHERE chat_id=?",
                 (chat_id,),
             )
             row = cur.fetchone()
-        return row[0] if row else None
+        if not row:
+            return None
+        return row[0], _normalize_status_column(row[1])
 
     def list_unexported_undelivered(self, limit: int = 100) -> list[UndeliveredEvent]:
         with self._connect() as conn:
@@ -532,3 +575,12 @@ def _normalize_phone(phone: str | None) -> str:
     if not phone:
         return ""
     return phone.strip()
+
+
+def _normalize_status_column(status_column: str | None) -> str:
+    if not status_column:
+        return "C"
+    normalized = status_column.strip().upper()
+    if not normalized or not normalized.isalpha():
+        return "C"
+    return normalized

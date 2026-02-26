@@ -314,9 +314,18 @@ async def remind_2w_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         args=[context.bot, chat_id],
     )
 
-    row_number = _resolve_appointment_row(query.data or "", query.message.chat.id, context)
+    row_number, status_column = _resolve_status_target(
+        query.data or "",
+        query.message.chat.id,
+        context,
+    )
     if row_number:
-        _set_appointment_status(context, row_number, "напомнить через 2 недели")
+        _set_appointment_status(
+            context,
+            row_number,
+            "напомнить через 2 недели",
+            status_column=status_column,
+        )
 
 
 async def not_ready_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -327,7 +336,11 @@ async def not_ready_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await query.answer()
     await query.message.reply_text("Подскажите, пожалуйста, почему не получается?")
 
-    row_number = _resolve_appointment_row(query.data or "", query.message.chat.id, context)
+    row_number, status_column = _resolve_status_target(
+        query.data or "",
+        query.message.chat.id,
+        context,
+    )
     store: SQLiteStateStore = context.application.bot_data["store"]
     tz = ZoneInfo(context.application.bot_data["tz"])
     username = f"@{query.from_user.username}" if query.from_user.username else f"id:{query.from_user.id}"
@@ -337,9 +350,15 @@ async def not_ready_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         created_at=datetime.now(tz),
         action_type="not_ready_comment",
         appointment_row=row_number,
+        status_column=status_column,
     )
     if row_number:
-        _set_appointment_status(context, row_number, "не готов, ожидаем комментарий")
+        _set_appointment_status(
+            context,
+            row_number,
+            "не готов, ожидаем комментарий",
+            status_column=status_column,
+        )
 
 
 async def confirm_appt_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -608,7 +627,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if pending.action_type == "cancel_other_reason":
             if pending.appointment_row:
                 _set_appointment_cancel_reason(context, pending.appointment_row, text)
-                _set_appointment_status(context, pending.appointment_row, "отменил")
+                _set_appointment_status(
+                    context,
+                    pending.appointment_row,
+                    "отменил",
+                    status_column=pending.status_column,
+                )
             sheets.append_comment(
                 context.application.bot_data["config"].google_comments_tab,
                 [now_str, pending.username, f"Отмена записи: {text}", full_name, phone],
@@ -621,7 +645,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             [now_str, pending.username, text, full_name, phone],
         )
         if pending.appointment_row:
-            _set_appointment_status(context, pending.appointment_row, "не готов, комментарий")
+            _set_appointment_status(
+                context,
+                pending.appointment_row,
+                "не готов, комментарий",
+                status_column=pending.status_column,
+            )
         await update.message.reply_text("Спасибо, комментарий записан!")
         return
 
@@ -726,17 +755,20 @@ def _parse_full_name_segments(text: str) -> str:
     return normalized
 
 
-def _resolve_appointment_row(
+def _resolve_status_target(
     callback_data: str,
     chat_id: int,
     context: ContextTypes.DEFAULT_TYPE,
-) -> int | None:
+) -> tuple[int | None, str]:
     for prefix in ("remind_2w", "not_ready"):
         row = _parse_callback_row(callback_data, prefix)
         if row:
-            return row
+            return row, "C"
     store: SQLiteStateStore = context.application.bot_data["store"]
-    return store.get_reminder_context(chat_id)
+    target = store.get_reminder_context_target(chat_id)
+    if not target:
+        return None, "C"
+    return target
 
 
 def _parse_callback_row(callback_data: str, prefix: str) -> int | None:
@@ -764,10 +796,11 @@ def _set_appointment_status(
     context: ContextTypes.DEFAULT_TYPE,
     row_number: int,
     status: str,
+    status_column: str = "C",
 ) -> None:
     sheets: SheetsClient = context.application.bot_data["sheets"]
     tab = context.application.bot_data["config"].google_appointments_tab
-    sheets.update_appointment_status(tab, row_number, status)
+    sheets.update_appointment_status(tab, row_number, status, status_column=status_column)
 
 
 def _set_appointment_cancel_reason(
