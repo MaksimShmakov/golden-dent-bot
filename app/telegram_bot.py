@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from dateutil.relativedelta import relativedelta
@@ -13,6 +14,7 @@ from telegram import (
     ReplyKeyboardRemove,
     Update,
 )
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -52,6 +54,8 @@ _CANCEL_REASON_LABELS = {
     "other": "Другое",
 }
 _PENDING_ACTION_COLLECT_FULL_NAME = "collect_full_name"
+_BROADCAST_STATE_KEY = "broadcast_state"
+_BROADCAST_DRAFT_KEY = "broadcast_draft"
 
 
 def build_application(
@@ -74,6 +78,8 @@ def build_application(
     application.add_handler(CommandHandler("test_daily", test_daily_cmd))
     application.add_handler(CommandHandler("test_daily_debug", test_daily_debug_cmd))
     application.add_handler(CommandHandler("test_reset", test_reset_cmd))
+    application.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    application.add_handler(CommandHandler("broadcast_cancel", broadcast_cancel_cmd))
     application.add_handler(CommandHandler("whoami", whoami_cmd))
 
     application.add_handler(
@@ -104,6 +110,7 @@ def build_application(
     application.add_handler(CallbackQueryHandler(offer_flash_cb, pattern="^offer_flash$"))
 
     application.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return application
 
@@ -281,6 +288,26 @@ async def test_reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ]
         )
     )
+
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or not update.effective_chat:
+        return
+    _record_user(update, context)
+    _start_broadcast_flow(context)
+    await update.effective_chat.send_message(
+        "Шаг 1/5. Пришлите фото для рассылки или напишите `пропустить`.",
+        parse_mode=None,
+    )
+
+
+async def broadcast_cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat:
+        return
+    if _clear_broadcast_flow(context):
+        await update.effective_chat.send_message("Кастомная рассылка отменена.")
+        return
+    await update.effective_chat.send_message("Сейчас нет активной кастомной рассылки.")
 
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -577,12 +604,37 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+
+    _record_user(update, context)
+    state = _get_broadcast_state(context)
+    if not state:
+        return
+    if state != "photo":
+        await update.message.reply_text("Сейчас ожидаю текстовый ответ. Если нужно прервать, /broadcast_cancel.")
+        return
+
+    if not update.message.photo:
+        await update.message.reply_text("Не удалось получить фото. Пришлите изображение еще раз.")
+        return
+
+    draft = _get_broadcast_draft(context)
+    draft["photo_file_id"] = update.message.photo[-1].file_id
+    _set_broadcast_state(context, "text")
+    await update.message.reply_text("Шаг 2/5. Напишите текст рассылки.")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
 
     _record_user(update, context)
     text = update.message.text.strip()
+
+    if await _handle_broadcast_text(update, context, text):
+        return
 
     store: SQLiteStateStore = context.application.bot_data["store"]
     pending = store.pop_pending(update.effective_user.id)
@@ -733,6 +785,304 @@ async def _request_full_name_if_needed(update: Update, context: ContextTypes.DEF
         "Пожалуйста, напишите ФИО в формате: Фамилия Имя Отчество."
     )
     return True
+
+
+def _start_broadcast_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data[_BROADCAST_DRAFT_KEY] = {
+        "photo_file_id": None,
+        "text": "",
+        "buttons": [],
+        "usernames": [],
+    }
+    _set_broadcast_state(context, "photo")
+
+
+def _clear_broadcast_flow(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    had_state = bool(context.user_data.pop(_BROADCAST_STATE_KEY, None))
+    had_draft = bool(context.user_data.pop(_BROADCAST_DRAFT_KEY, None))
+    return had_state or had_draft
+
+
+def _set_broadcast_state(context: ContextTypes.DEFAULT_TYPE, state: str) -> None:
+    context.user_data[_BROADCAST_STATE_KEY] = state
+
+
+def _get_broadcast_state(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    state = context.user_data.get(_BROADCAST_STATE_KEY)
+    return state if isinstance(state, str) else None
+
+
+def _get_broadcast_draft(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    draft = context.user_data.get(_BROADCAST_DRAFT_KEY)
+    if isinstance(draft, dict):
+        return draft
+    context.user_data[_BROADCAST_DRAFT_KEY] = {
+        "photo_file_id": None,
+        "text": "",
+        "buttons": [],
+        "usernames": [],
+    }
+    return context.user_data[_BROADCAST_DRAFT_KEY]
+
+
+async def _handle_broadcast_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> bool:
+    state = _get_broadcast_state(context)
+    if not state or not update.message:
+        return False
+
+    lowered = text.strip().lower()
+    draft = _get_broadcast_draft(context)
+    skip_values = {"пропустить", "нет", "skip"}
+
+    if state == "photo":
+        if lowered not in skip_values:
+            await update.message.reply_text(
+                "Сейчас ожидаю фото. Пришлите изображение или напишите `пропустить`."
+            )
+            return True
+        draft["photo_file_id"] = None
+        _set_broadcast_state(context, "text")
+        await update.message.reply_text("Шаг 2/5. Напишите текст рассылки.")
+        return True
+
+    if state == "text":
+        if not text:
+            await update.message.reply_text("Текст пустой. Напишите текст рассылки.")
+            return True
+        draft["text"] = text
+        _set_broadcast_state(context, "buttons_choice")
+        await update.message.reply_text("Шаг 3/5. Нужны кнопки? Ответьте `да` или `нет`.")
+        return True
+
+    if state == "buttons_choice":
+        if lowered in {"да", "yes", "y"}:
+            _set_broadcast_state(context, "buttons")
+            await update.message.reply_text(
+                "Пришлите кнопки, каждая с новой строки в формате:\n"
+                "Текст кнопки | https://example.com\n"
+                "Если кнопки не нужны, напишите `пропустить`."
+            )
+            return True
+        if lowered in {"нет", "no", "n"}:
+            draft["buttons"] = []
+            _set_broadcast_state(context, "recipients")
+            await update.message.reply_text(_broadcast_recipients_prompt())
+            return True
+        await update.message.reply_text("Ответьте `да` или `нет`.")
+        return True
+
+    if state == "buttons":
+        if lowered in skip_values:
+            draft["buttons"] = []
+            _set_broadcast_state(context, "recipients")
+            await update.message.reply_text(_broadcast_recipients_prompt())
+            return True
+
+        buttons, error = _parse_broadcast_buttons(text)
+        if error:
+            await update.message.reply_text(error)
+            return True
+        draft["buttons"] = buttons
+        _set_broadcast_state(context, "recipients")
+        await update.message.reply_text(_broadcast_recipients_prompt())
+        return True
+
+    if state == "recipients":
+        store: SQLiteStateStore = context.application.bot_data["store"]
+        if lowered in {"all", "все", "база"}:
+            usernames = store.list_client_usernames()
+        else:
+            usernames = _parse_broadcast_usernames(text)
+
+        if not usernames:
+            await update.message.reply_text(
+                "Не нашел получателей. Введите `all` или список username."
+            )
+            return True
+
+        draft["usernames"] = usernames
+        _set_broadcast_state(context, "confirm")
+        await update.message.reply_text(
+            "\n".join(
+                [
+                    "Шаг 5/5. Проверьте рассылку:",
+                    f"Фото: {'да' if draft.get('photo_file_id') else 'нет'}",
+                    f"Кнопок: {len(draft.get('buttons', []))}",
+                    f"Получателей: {len(usernames)}",
+                    "Ниже отправляю предпросмотр. Напишите `отправить` или `отмена`.",
+                ]
+            )
+        )
+        await _send_custom_broadcast_payload(
+            context.bot,
+            update.effective_chat.id,
+            draft,
+        )
+        return True
+
+    if state == "confirm":
+        if lowered in {"отмена", "cancel", "нет"}:
+            _clear_broadcast_flow(context)
+            await update.message.reply_text("Кастомная рассылка отменена.")
+            return True
+        if lowered in {"отправить", "send", "старт"}:
+            await _run_custom_broadcast(update, context, draft)
+            _clear_broadcast_flow(context)
+            return True
+        await update.message.reply_text("Напишите `отправить` для запуска или `отмена`.")
+        return True
+
+    return False
+
+
+def _broadcast_recipients_prompt() -> str:
+    return (
+        "Шаг 4/5. Укажите базу получателей:\n"
+        "- `all` чтобы отправить всем клиентам из базы.\n"
+        "- или список username через пробел, запятую или с новой строки."
+    )
+
+
+def _parse_broadcast_usernames(text: str) -> list[str]:
+    raw_tokens = [
+        token.strip()
+        for chunk in text.replace(",", " ").replace(";", " ").splitlines()
+        for token in chunk.split()
+    ]
+    seen: set[str] = set()
+    usernames: list[str] = []
+    for raw in raw_tokens:
+        normalized = _normalize_broadcast_target(raw)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        usernames.append(normalized)
+    return usernames
+
+
+def _normalize_broadcast_target(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    if cleaned.startswith("id:"):
+        suffix = cleaned[3:].strip()
+        return f"id:{suffix}" if suffix.isdigit() else ""
+    if cleaned.isdigit():
+        return cleaned
+    if not cleaned.startswith("@"):
+        cleaned = f"@{cleaned}"
+    return cleaned.lower()
+
+
+def _parse_broadcast_buttons(text: str) -> tuple[list[tuple[str, str]], str | None]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return [], "Список кнопок пустой. Пришлите строки в формате: Текст | https://url"
+    if len(lines) > 10:
+        return [], "Слишком много кнопок. Максимум 10."
+
+    buttons: list[tuple[str, str]] = []
+    for index, line in enumerate(lines, start=1):
+        if "|" not in line:
+            return [], f"Строка {index}: нет разделителя `|`."
+        label, url = [part.strip() for part in line.split("|", maxsplit=1)]
+        if not label:
+            return [], f"Строка {index}: пустой текст кнопки."
+        if not _is_valid_button_url(url):
+            return [], f"Строка {index}: некорректная ссылка."
+        buttons.append((label, url))
+    return buttons, None
+
+
+def _is_valid_button_url(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _build_broadcast_keyboard(buttons: list[tuple[str, str]]):
+    if not buttons:
+        return None
+    rows = [[InlineKeyboardButton(label, url=url)] for label, url in buttons]
+    return InlineKeyboardMarkup(rows)
+
+
+def _resolve_broadcast_target(store: SQLiteStateStore, username: str):
+    chat_id = store.get_chat_id(username)
+    if chat_id:
+        return chat_id
+    if username.startswith("id:") and username[3:].isdigit():
+        return int(username[3:])
+    if username.isdigit():
+        return int(username)
+    return username if username.startswith("@") else f"@{username}"
+
+
+async def _send_custom_broadcast_payload(bot, target, draft: dict) -> None:
+    text = str(draft.get("text", "")).strip()
+    if not text:
+        return
+    buttons = draft.get("buttons", [])
+    keyboard = _build_broadcast_keyboard(buttons)
+    photo_file_id = draft.get("photo_file_id")
+    if photo_file_id:
+        if len(text) <= 1024:
+            await bot.send_photo(
+                chat_id=target,
+                photo=photo_file_id,
+                caption=text,
+                reply_markup=keyboard,
+            )
+            return
+        await bot.send_photo(chat_id=target, photo=photo_file_id)
+        await bot.send_message(chat_id=target, text=text, reply_markup=keyboard)
+        return
+    await bot.send_message(chat_id=target, text=text, reply_markup=keyboard)
+
+
+async def _run_custom_broadcast(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    draft: dict,
+) -> None:
+    if not update.message or not update.effective_chat:
+        return
+    usernames = list(draft.get("usernames", []))
+    if not usernames:
+        await update.message.reply_text("Список получателей пустой, рассылка отменена.")
+        return
+
+    await update.message.reply_text(f"Запускаю рассылку. Получателей: {len(usernames)}")
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    sent = 0
+    failed = 0
+    failed_lines: list[str] = []
+    for username in usernames:
+        target = _resolve_broadcast_target(store, username)
+        try:
+            await _send_custom_broadcast_payload(context.bot, target, draft)
+            sent += 1
+        except TelegramError as exc:
+            failed += 1
+            if len(failed_lines) < 10:
+                failed_lines.append(f"{username}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            if len(failed_lines) < 10:
+                failed_lines.append(f"{username}: {type(exc).__name__}")
+
+    lines = [
+        "Кастомная рассылка завершена.",
+        f"Успешно: {sent}",
+        f"Ошибок: {failed}",
+    ]
+    if failed_lines:
+        lines.append("Первые ошибки:")
+        lines.extend(failed_lines)
+    await update.effective_chat.send_message("\n".join(lines))
 
 
 def _sync_clients_sheet(context: ContextTypes.DEFAULT_TYPE) -> None:

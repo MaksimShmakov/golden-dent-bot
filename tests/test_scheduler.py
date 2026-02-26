@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from dateutil.relativedelta import relativedelta
 
-from app.scheduler import send_daily_messages
+from app.scheduler import _build_reschedule_url, send_daily_messages
 from app.sheets import SheetEntry
 
 
@@ -228,3 +228,9 @@ def test_send_daily_messages_uses_periodic_column_for_three_months():
     assert len(bot.sent_messages) == 1
     assert "3 месяцев" in bot.sent_messages[0][1]
     assert store.reminder_context == (10001, 7, "G")
+
+
+def test_build_reschedule_url_contains_date_and_time():
+    dt = datetime(2026, 2, 27, 14, 30)
+    url = _build_reschedule_url(dt)
+    assert "27.02.2026%2014%3A30" in url

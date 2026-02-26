@@ -264,8 +264,8 @@ async def _send_periodic_message(
 
 
 def _build_reschedule_url(dt: datetime) -> str:
-    date_str = dt.strftime("%d.%m.%Y")
-    text = f"Здравствуйте! Хочу перенести мою запись {date_str}"
+    date_time_str = dt.strftime("%d.%m.%Y %H:%M")
+    text = f"Здравствуйте! Хочу перенести мою запись {date_time_str}"
     return f"https://t.me/{_ADMIN_USERNAME}?text={quote(text)}"
 
 
