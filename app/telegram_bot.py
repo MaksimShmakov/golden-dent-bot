@@ -113,8 +113,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _record_user(update, context)
     await send_info_start_message(context.bot, update.effective_chat.id)
-    await _request_full_name_if_needed(update, context)
-    await _request_contact_if_needed(update, context)
+    full_name_requested = await _request_full_name_if_needed(update, context)
+    if not full_name_requested:
+        await _request_contact_if_needed(update, context)
 
     tz = ZoneInfo(context.application.bot_data["tz"])
     now = datetime.now(tz)
@@ -595,6 +596,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if changed:
                 _sync_clients_sheet(context)
             await update.message.reply_text("Спасибо! ФИО сохранили.")
+            await _request_contact_if_needed(update, context)
             return
 
         sheets: SheetsClient = context.application.bot_data["sheets"]
@@ -678,14 +680,14 @@ async def _request_contact_if_needed(update: Update, context: ContextTypes.DEFAU
     )
 
 
-async def _request_full_name_if_needed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _request_full_name_if_needed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not update.effective_user or not update.effective_chat:
-        return
+        return False
 
     store: SQLiteStateStore = context.application.bot_data["store"]
     profile = store.get_client(update.effective_user.id)
     if profile and profile.full_name:
-        return
+        return False
 
     tz = ZoneInfo(context.application.bot_data["tz"])
     user = update.effective_user
@@ -699,6 +701,7 @@ async def _request_full_name_if_needed(update: Update, context: ContextTypes.DEF
     await update.effective_chat.send_message(
         "Пожалуйста, напишите ФИО в формате: Фамилия Имя Отчество."
     )
+    return True
 
 
 def _sync_clients_sheet(context: ContextTypes.DEFAULT_TYPE) -> None:
