@@ -663,6 +663,8 @@ async def _request_contact_if_needed(update: Update, context: ContextTypes.DEFAU
 
     store: SQLiteStateStore = context.application.bot_data["store"]
     profile = store.get_client(update.effective_user.id)
+    if not profile or not profile.full_name:
+        return
     if profile and profile.phone:
         return
 
