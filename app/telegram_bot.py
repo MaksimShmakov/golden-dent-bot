@@ -51,6 +51,7 @@ _CANCEL_REASON_LABELS = {
     "sick": "Заболел",
     "other": "Другое",
 }
+_PENDING_ACTION_COLLECT_FULL_NAME = "collect_full_name"
 
 
 def build_application(
@@ -111,6 +112,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _record_user(update, context)
     await send_info_start_message(context.bot, update.effective_chat.id)
+    await _request_full_name_if_needed(update, context)
     await _request_contact_if_needed(update, context)
 
     tz = ZoneInfo(context.application.bot_data["tz"])
@@ -498,7 +500,8 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     tz = ZoneInfo(context.application.bot_data["tz"])
     now = datetime.now(tz)
     user = update.effective_user
-    full_name = _build_full_name(user)
+    existing = store.get_client(user.id)
+    full_name = existing.full_name if existing else ""
     changed = store.upsert_client(
         user_id=user.id,
         username=user.username,
@@ -522,40 +525,69 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     _record_user(update, context)
     text = update.message.text.strip()
-    if text.lower() == "пропустить":
-        await update.message.reply_text("Хорошо, продолжим без номера.", reply_markup=ReplyKeyboardRemove())
-        return
 
     store: SQLiteStateStore = context.application.bot_data["store"]
     pending = store.pop_pending(update.effective_user.id)
-    if not pending:
-        return
+    if pending:
+        tz = ZoneInfo(context.application.bot_data["tz"])
+        if pending.action_type == _PENDING_ACTION_COLLECT_FULL_NAME:
+            full_name = _parse_full_name_segments(text)
+            if not full_name:
+                store.set_pending(
+                    user_id=update.effective_user.id,
+                    username=pending.username,
+                    created_at=datetime.now(tz),
+                    action_type=_PENDING_ACTION_COLLECT_FULL_NAME,
+                )
+                await update.message.reply_text(
+                    "Пожалуйста, напишите ФИО в формате: Фамилия Имя Отчество."
+                )
+                return
 
-    sheets: SheetsClient = context.application.bot_data["sheets"]
-    tz = ZoneInfo(context.application.bot_data["tz"])
-    now_str = datetime.now(tz).strftime("%d.%m.%Y %H:%M")
-    profile = store.get_client(update.effective_user.id)
-    full_name = profile.full_name if profile else ""
-    phone = profile.phone if profile else ""
+            now = datetime.now(tz)
+            profile = store.get_client(update.effective_user.id)
+            phone = profile.phone if profile else ""
+            changed = store.upsert_client(
+                user_id=update.effective_user.id,
+                username=update.effective_user.username,
+                full_name=full_name,
+                phone=phone,
+                updated_at=now,
+            )
+            if changed:
+                _sync_clients_sheet(context)
+            await update.message.reply_text("Спасибо! ФИО сохранили.")
+            return
 
-    if pending.action_type == "cancel_other_reason":
-        if pending.appointment_row:
-            _set_appointment_cancel_reason(context, pending.appointment_row, text)
-            _set_appointment_status(context, pending.appointment_row, "отменил")
+        sheets: SheetsClient = context.application.bot_data["sheets"]
+        now_str = datetime.now(tz).strftime("%d.%m.%Y %H:%M")
+        profile = store.get_client(update.effective_user.id)
+        full_name = profile.full_name if profile else ""
+        phone = profile.phone if profile else ""
+
+        if pending.action_type == "cancel_other_reason":
+            if pending.appointment_row:
+                _set_appointment_cancel_reason(context, pending.appointment_row, text)
+                _set_appointment_status(context, pending.appointment_row, "отменил")
+            sheets.append_comment(
+                context.application.bot_data["config"].google_comments_tab,
+                [now_str, pending.username, f"Отмена записи: {text}", full_name, phone],
+            )
+            await update.message.reply_text("Спасибо, причина отмены записана.")
+            return
+
         sheets.append_comment(
             context.application.bot_data["config"].google_comments_tab,
-            [now_str, pending.username, f"Отмена записи: {text}", full_name, phone],
+            [now_str, pending.username, text, full_name, phone],
         )
-        await update.message.reply_text("Спасибо, причина отмены записана.")
+        if pending.appointment_row:
+            _set_appointment_status(context, pending.appointment_row, "не готов, комментарий")
+        await update.message.reply_text("Спасибо, комментарий записан!")
         return
 
-    sheets.append_comment(
-        context.application.bot_data["config"].google_comments_tab,
-        [now_str, pending.username, text, full_name, phone],
-    )
-    if pending.appointment_row:
-        _set_appointment_status(context, pending.appointment_row, "не готов, комментарий")
-    await update.message.reply_text("Спасибо, комментарий записан!")
+    if text.lower() == "пропустить":
+        await update.message.reply_text("Хорошо, продолжим без номера.", reply_markup=ReplyKeyboardRemove())
+        return
 
 
 def _record_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -571,11 +603,12 @@ def _record_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         store.upsert_user(user.username, user.id, now)
 
     existing = store.get_client(user.id)
+    full_name = existing.full_name if existing else ""
     phone = existing.phone if existing else ""
     changed = store.upsert_client(
         user_id=user.id,
         username=user.username,
-        full_name=_build_full_name(user),
+        full_name=full_name,
         phone=phone,
         updated_at=now,
     )
@@ -607,6 +640,29 @@ async def _request_contact_if_needed(update: Update, context: ContextTypes.DEFAU
     )
 
 
+async def _request_full_name_if_needed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or not update.effective_chat:
+        return
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    profile = store.get_client(update.effective_user.id)
+    if profile and profile.full_name:
+        return
+
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    user = update.effective_user
+    username = f"@{user.username}" if user.username else f"id:{user.id}"
+    store.set_pending(
+        user_id=user.id,
+        username=username,
+        created_at=datetime.now(tz),
+        action_type=_PENDING_ACTION_COLLECT_FULL_NAME,
+    )
+    await update.effective_chat.send_message(
+        "Пожалуйста, напишите ФИО в формате: Фамилия Имя Отчество."
+    )
+
+
 def _sync_clients_sheet(context: ContextTypes.DEFAULT_TYPE) -> None:
     sheets: SheetsClient = context.application.bot_data["sheets"]
     store: SQLiteStateStore = context.application.bot_data["store"]
@@ -617,9 +673,14 @@ def _sync_clients_sheet(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("Failed to sync clients sheet %s: %s", clients_tab, exc)
 
 
-def _build_full_name(user) -> str:
-    parts = [user.last_name or "", user.first_name or ""]
-    return " ".join(part for part in parts if part).strip()
+def _parse_full_name_segments(text: str) -> str:
+    normalized = " ".join(text.split())
+    if not normalized:
+        return ""
+    parts = normalized.split(" ")
+    if len(parts) < 2 or len(parts) > 4:
+        return ""
+    return normalized
 
 
 def _resolve_appointment_row(
