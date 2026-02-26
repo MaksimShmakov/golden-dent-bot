@@ -61,3 +61,33 @@ def test_reminder_context_and_undelivered_events(tmp_path):
 
     store.mark_undelivered_exported(event_id, now)
     assert store.list_unexported_undelivered() == []
+
+
+def test_reset_user_state_clears_user_related_data(tmp_path):
+    store = SQLiteStateStore(str(tmp_path))
+    now = datetime(2026, 2, 11, 10, 0, 0)
+
+    store.upsert_user("User42", 42, now)
+    store.upsert_client(42, "User42", "Петров Петр", "+79000000000", now)
+    store.set_pending(
+        user_id=42,
+        username="@user42",
+        created_at=now,
+        action_type="collect_full_name",
+    )
+    store.set_reminder_context(chat_id=42, appointment_row=12, updated_at=now)
+    assert store.mark_activated(42, now) is True
+
+    stats = store.reset_user_state(user_id=42, chat_id=42, username="User42")
+
+    assert stats["total"] == 5
+    assert stats["client_map"] == 1
+    assert stats["user_activation"] == 1
+    assert stats["pending_comment"] == 1
+    assert stats["user_map"] == 1
+    assert stats["reminder_context"] == 1
+    assert store.get_client(42) is None
+    assert store.get_chat_id("@user42") is None
+    assert store.get_reminder_context(42) is None
+    assert list(store.list_pending()) == []
+    assert store.mark_activated(42, now) is True

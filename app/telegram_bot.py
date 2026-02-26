@@ -73,6 +73,7 @@ def build_application(
     application.add_handler(CommandHandler("test_main", test_main_cmd))
     application.add_handler(CommandHandler("test_daily", test_daily_cmd))
     application.add_handler(CommandHandler("test_daily_debug", test_daily_debug_cmd))
+    application.add_handler(CommandHandler("test_reset", test_reset_cmd))
     application.add_handler(CommandHandler("whoami", whoami_cmd))
 
     application.add_handler(
@@ -242,6 +243,43 @@ async def test_daily_debug_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
         lines.append("Нет валидных строк (проверь формат даты и username).")
 
     await update.effective_chat.send_message("\n".join(lines))
+
+
+async def test_reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or not update.effective_chat:
+        return
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    stats = store.reset_user_state(
+        user_id=update.effective_user.id,
+        chat_id=update.effective_chat.id,
+        username=update.effective_user.username,
+    )
+
+    scheduler = context.application.bot_data["scheduler"]
+    for job_id in (
+        f"start_followup_{update.effective_user.id}",
+        f"remind_{update.effective_chat.id}",
+    ):
+        job = scheduler.get_job(job_id)
+        if job:
+            scheduler.remove_job(job_id)
+
+    if stats["client_map"] > 0:
+        _sync_clients_sheet(context)
+
+    await update.effective_chat.send_message(
+        "\n".join(
+            [
+                "Тестовый сброс завершен.",
+                f"Удалено записей: {stats['total']}",
+                f"client_map={stats['client_map']}, user_activation={stats['user_activation']}, "
+                f"pending_comment={stats['pending_comment']}, user_map={stats['user_map']}, "
+                f"reminder_context={stats['reminder_context']}",
+                "Для прохождения пути нового клиента отправьте /start.",
+            ]
+        )
+    )
 
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

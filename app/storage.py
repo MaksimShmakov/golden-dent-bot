@@ -365,6 +365,56 @@ class SQLiteStateStore:
             conn.commit()
         return True
 
+    def reset_user_state(
+        self,
+        user_id: int,
+        chat_id: int,
+        username: str | None,
+    ) -> dict[str, int]:
+        normalized_username = _normalize_username(username)
+        with self._connect() as conn:
+            deleted_pending = conn.execute(
+                "DELETE FROM pending_comment WHERE user_id=?",
+                (user_id,),
+            ).rowcount
+            deleted_client = conn.execute(
+                "DELETE FROM client_map WHERE user_id=?",
+                (user_id,),
+            ).rowcount
+            deleted_activation = conn.execute(
+                "DELETE FROM user_activation WHERE user_id=?",
+                (user_id,),
+            ).rowcount
+            deleted_reminder = conn.execute(
+                "DELETE FROM reminder_context WHERE chat_id=?",
+                (chat_id,),
+            ).rowcount
+            if normalized_username:
+                deleted_user_map = conn.execute(
+                    "DELETE FROM user_map WHERE username=? OR chat_id=?",
+                    (normalized_username, user_id),
+                ).rowcount
+            else:
+                deleted_user_map = conn.execute(
+                    "DELETE FROM user_map WHERE chat_id=?",
+                    (user_id,),
+                ).rowcount
+            conn.commit()
+        return {
+            "pending_comment": deleted_pending,
+            "client_map": deleted_client,
+            "user_activation": deleted_activation,
+            "reminder_context": deleted_reminder,
+            "user_map": deleted_user_map,
+            "total": (
+                deleted_pending
+                + deleted_client
+                + deleted_activation
+                + deleted_reminder
+                + deleted_user_map
+            ),
+        }
+
     def get_chat_id(self, username: str) -> int | None:
         normalized = _normalize_username(username)
         if not normalized:
