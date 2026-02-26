@@ -150,6 +150,15 @@ def _iter_sheet_entries(rows: list[list[str]]) -> Iterable[SheetEntry]:
             reminder_months=3,
             status_column="G",
         )
+        if not periodic_3m and appointment_entry:
+            periodic_3m = _build_periodic_entry_from_base(
+                row_number=row_number,
+                dt=appointment_entry.dt,
+                username=appointment_entry.username,
+                status=_cell_value(row, 6),
+                reminder_months=3,
+                status_column="G",
+            )
         if periodic_3m:
             yield periodic_3m
 
@@ -162,6 +171,15 @@ def _iter_sheet_entries(rows: list[list[str]]) -> Iterable[SheetEntry]:
             reminder_months=6,
             status_column="L",
         )
+        if not periodic_6m and appointment_entry:
+            periodic_6m = _build_periodic_entry_from_base(
+                row_number=row_number,
+                dt=appointment_entry.dt,
+                username=appointment_entry.username,
+                status=_cell_value(row, 11),
+                reminder_months=6,
+                status_column="L",
+            )
         if periodic_6m:
             yield periodic_6m
 
@@ -176,18 +194,14 @@ def _build_appointment_entry(row_number: int, row: list[str]) -> SheetEntry | No
     if not username:
         return None
 
-    reminder_months = _parse_explicit_reminder_months(_cell_value(row, 4))
-    surgeon_raw = _cell_value(row, 5)
-    surgeon_dt = _parse_datetime(surgeon_raw) if surgeon_raw else None
-
     return SheetEntry(
         row_number=row_number,
         dt=dt,
         username=username,
         status=_cell_value(row, 2),
         cancel_reason=_cell_value(row, 3),
-        reminder_months=reminder_months,
-        surgeon_dt=surgeon_dt,
+        reminder_months=0,
+        surgeon_dt=None,
         status_column="C",
         entry_kind="appointment",
     )
@@ -224,25 +238,31 @@ def _build_periodic_entry(
     )
 
 
+def _build_periodic_entry_from_base(
+    row_number: int,
+    dt: datetime,
+    username: str,
+    status: str,
+    reminder_months: int,
+    status_column: str,
+) -> SheetEntry:
+    return SheetEntry(
+        row_number=row_number,
+        dt=dt,
+        username=username,
+        status=status,
+        cancel_reason="",
+        reminder_months=reminder_months,
+        surgeon_dt=None,
+        status_column=status_column,
+        entry_kind="periodic",
+    )
+
+
 def _cell_value(row: list[str], index: int) -> str:
     if len(row) <= index:
         return ""
     return row[index].strip()
-
-
-def _parse_explicit_reminder_months(value: str) -> int:
-    cleaned = value.strip()
-    if not cleaned:
-        return 0
-    if _parse_datetime(cleaned):
-        return 0
-    digits = "".join(ch for ch in cleaned if ch.isdigit())
-    if not digits:
-        return 0
-    months = int(digits)
-    if months <= 0 or months > 120:
-        return 0
-    return months
 
 
 def _normalize_status_column(status_column: str | None) -> str:

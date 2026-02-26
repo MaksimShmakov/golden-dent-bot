@@ -62,7 +62,7 @@ def test_iter_sheet_entries_reads_three_ranges_for_reminders():
     assert entries[2].reminder_months == 6
 
 
-def test_iter_sheet_entries_keeps_legacy_explicit_months():
+def test_iter_sheet_entries_generates_periodic_from_appointment_columns():
     rows = [
         ["appt_dt", "appt_user", "appt_status", "cancel", "months", "surgeon_dt"],
         ["27.02.2026 10:00", "@appointment", "", "", "3", ""],
@@ -70,6 +70,14 @@ def test_iter_sheet_entries_keeps_legacy_explicit_months():
 
     entries = list(_iter_sheet_entries(rows))
 
-    assert len(entries) == 1
+    assert len(entries) == 3
     assert entries[0].entry_kind == "appointment"
-    assert entries[0].reminder_months == 3
+    assert entries[0].reminder_months == 0
+    assert entries[1].entry_kind == "periodic"
+    assert entries[1].reminder_months == 3
+    assert entries[1].status_column == "G"
+    assert entries[1].username == "@appointment"
+    assert entries[2].entry_kind == "periodic"
+    assert entries[2].reminder_months == 6
+    assert entries[2].status_column == "L"
+    assert entries[2].username == "@appointment"
