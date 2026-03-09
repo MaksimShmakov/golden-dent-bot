@@ -29,6 +29,7 @@ from app.messages import (
     CHILD_SUBSCRIPTION_TEXT,
     FLASH_WHITENING_TEXT,
     IMPLANT_CROWN_TEXT,
+    INFO_START_MESSAGE,
     SPECIAL_OFFERS_HEADER,
     ULTRASOUND_EXTRACTION_TEXT,
     build_adult_subscription_keyboard,
@@ -83,6 +84,7 @@ def build_application(
         header=SPECIAL_OFFERS_HEADER,
         offers=_build_default_offer_templates(),
     )
+    store.ensure_info_start_defaults(INFO_START_MESSAGE)
 
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("test_main", test_main_cmd))
@@ -117,7 +119,7 @@ def build_application(
     application.add_handler(
         CallbackQueryHandler(
             offers_admin_action_cb,
-            pattern=r"^offers_admin:(header|add|edit|delete|preview|done)$",
+            pattern=r"^offers_admin:(header|add|edit|delete|start_text|start_photo|preview|done)$",
         )
     )
     application.add_handler(
@@ -145,7 +147,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.effective_user:
         return
     _record_user(update, context)
-    await send_info_start_message(context.bot, update.effective_chat.id)
+    await _send_info_start_menu(context.bot, update.effective_chat.id, context)
     full_name_requested = await _request_full_name_if_needed(update, context)
     if not full_name_requested:
         await _request_contact_if_needed(update, context)
@@ -548,7 +550,7 @@ async def go_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     _record_user(update, context)
     await query.answer()
-    await send_info_start_message(context.bot, query.message.chat.id)
+    await _send_info_start_menu(context.bot, query.message.chat.id, context)
 
 
 async def special_offers_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -677,6 +679,18 @@ async def offers_admin_action_cb(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text("Отправьте новый заголовок для сообщения с акциями.")
         return
 
+    if action == "start_text":
+        _set_offers_admin_state(context, "start_text")
+        context.user_data[_OFFERS_ADMIN_DRAFT_KEY] = {}
+        await query.message.reply_text("Отправьте новый текст стартового сообщения.")
+        return
+
+    if action == "start_photo":
+        _set_offers_admin_state(context, "start_photo")
+        context.user_data[_OFFERS_ADMIN_DRAFT_KEY] = {}
+        await query.message.reply_text("Отправьте новую картинку для стартового сообщения.")
+        return
+
     if action == "add":
         _set_offers_admin_state(context, "add_button_text")
         context.user_data[_OFFERS_ADMIN_DRAFT_KEY] = {
@@ -689,6 +703,7 @@ async def offers_admin_action_cb(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if action == "preview":
+        await _send_info_start_menu(context.bot, query.message.chat.id, context)
         await _send_special_offers_menu(context.bot, query.message.chat.id, context)
         await _send_offers_admin_panel(query.message.chat.id, context)
         return
@@ -817,6 +832,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     _record_user(update, context)
+    if await _handle_offers_admin_photo(update, context):
+        return
     state = _get_broadcast_state(context)
     if not state:
         return
@@ -832,6 +849,38 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     draft["photo_file_id"] = update.message.photo[-1].file_id
     _set_broadcast_state(context, "text")
     await update.message.reply_text("Шаг 2/5. Напишите текст рассылки.")
+
+
+async def _handle_offers_admin_photo(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    state = _get_offers_admin_state(context)
+    if not state or not update.message:
+        return False
+
+    if not await _ensure_admin(update, context):
+        _clear_offers_admin_flow(context)
+        return True
+
+    if state != "start_photo":
+        await update.message.reply_text(
+            "Сейчас ожидаю текстовый ответ. Если нужно прервать, /offers_admin_cancel."
+        )
+        return True
+
+    if not update.message.photo:
+        await update.message.reply_text("Не удалось получить фото. Пришлите изображение еще раз.")
+        return True
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    store.set_info_start_photo_file_id(update.message.photo[-1].file_id)
+    _clear_offers_admin_flow(context)
+    await update.message.reply_text("Стартовое фото обновлено.")
+    if update.effective_chat:
+        await _send_info_start_menu(context.bot, update.effective_chat.id, context)
+        await _send_offers_admin_panel(update.effective_chat.id, context)
+    return True
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1124,9 +1173,35 @@ async def _send_special_offers_menu(
     )
 
 
+async def _send_info_start_menu(
+    bot,
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    await send_info_start_message(
+        bot,
+        chat_id,
+        message_text=store.get_info_start_message(INFO_START_MESSAGE),
+        photo_file_id=store.get_info_start_photo_file_id(),
+    )
+
+
 def _build_offers_admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [
+                InlineKeyboardButton(
+                    "Изменить стартовый текст",
+                    callback_data="offers_admin:start_text",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "Изменить стартовое фото",
+                    callback_data="offers_admin:start_photo",
+                )
+            ],
             [InlineKeyboardButton("Изменить заголовок", callback_data="offers_admin:header")],
             [InlineKeyboardButton("Добавить акцию", callback_data="offers_admin:add")],
             [InlineKeyboardButton("Изменить акцию", callback_data="offers_admin:edit")],
@@ -1164,6 +1239,8 @@ async def _send_offers_admin_panel(
     store: SQLiteStateStore = context.application.bot_data["store"]
     offers = store.list_offer_templates()
     lines = [
+        "Панель управления стартовым экраном и акциями.",
+        f"Стартовое фото: {'да' if store.get_info_start_photo_file_id() else 'локальный файл'}",
         "Панель управления акциями.",
         f"Акций в меню: {len(offers)}",
     ]
@@ -1214,9 +1291,12 @@ def _get_sheet_admin_usernames(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
     cached_usernames = bot_data.get(_ADMINS_CACHE_KEY)
     now = datetime.utcnow()
 
-    if isinstance(cached_at, datetime) and isinstance(cached_usernames, set):
-        if now - cached_at <= _ADMINS_CACHE_TTL:
-            return cached_usernames
+    if (
+        isinstance(cached_at, datetime)
+        and isinstance(cached_usernames, set)
+        and now - cached_at <= _ADMINS_CACHE_TTL
+    ):
+        return cached_usernames
 
     sheets: SheetsClient = bot_data["sheets"]
     admins_tab = bot_data["config"].google_admins_tab
@@ -1283,6 +1363,24 @@ async def _handle_offers_admin_text(
     if lowered in cancel_values:
         _clear_offers_admin_flow(context)
         await update.message.reply_text("Редактирование акций отменено.")
+        return True
+
+    if state == "start_text":
+        if not text:
+            await update.message.reply_text("Текст пустой. Отправьте текст стартового сообщения.")
+            return True
+        store.set_info_start_message(text)
+        _clear_offers_admin_flow(context)
+        await update.message.reply_text("Стартовый текст обновлен.")
+        if update.effective_chat:
+            await _send_info_start_menu(context.bot, update.effective_chat.id, context)
+            await _send_offers_admin_panel(update.effective_chat.id, context)
+        return True
+
+    if state == "start_photo":
+        await update.message.reply_text(
+            "Сейчас жду фото. Если нужно прервать, используйте /offers_admin_cancel."
+        )
         return True
 
     if state == "header":

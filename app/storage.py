@@ -49,6 +49,8 @@ class OfferTemplate:
 
 class SQLiteStateStore:
     _SPECIAL_OFFERS_HEADER_KEY = "special_offers_header"
+    _INFO_START_MESSAGE_KEY = "info_start_message"
+    _INFO_START_PHOTO_FILE_ID_KEY = "info_start_photo_file_id"
 
     def __init__(self, data_dir: str) -> None:
         self._path = Path(data_dir) / "state.sqlite"
@@ -185,12 +187,19 @@ class SQLiteStateStore:
         if not columns:
             return
         if "legacy_key" not in columns:
-            conn.execute("ALTER TABLE offer_template ADD COLUMN legacy_key TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                "ALTER TABLE offer_template "
+                "ADD COLUMN legacy_key TEXT NOT NULL DEFAULT ''"
+            )
         if "sort_order" not in columns:
-            conn.execute("ALTER TABLE offer_template ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                "ALTER TABLE offer_template "
+                "ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+            )
         if "action_buttons_json" not in columns:
             conn.execute(
-                "ALTER TABLE offer_template ADD COLUMN action_buttons_json TEXT NOT NULL DEFAULT '[]'"
+                "ALTER TABLE offer_template "
+                "ADD COLUMN action_buttons_json TEXT NOT NULL DEFAULT '[]'"
             )
 
     def _migrate_clients_from_user_map(self, conn: sqlite3.Connection) -> None:
@@ -558,18 +567,50 @@ class SQLiteStateStore:
                     )
             conn.commit()
 
-    def get_special_offers_header(self, fallback: str = "") -> str:
+    def ensure_info_start_defaults(self, message_text: str) -> None:
         with self._connect() as conn:
             cur = conn.execute(
                 "SELECT value FROM offer_settings WHERE key=?",
-                (self._SPECIAL_OFFERS_HEADER_KEY,),
+                (self._INFO_START_MESSAGE_KEY,),
             )
             row = cur.fetchone()
-        if not row:
-            return _normalize_offer_text(fallback)
-        return _normalize_offer_text(row[0]) or _normalize_offer_text(fallback)
+            if not row:
+                conn.execute(
+                    "INSERT INTO offer_settings (key, value) VALUES (?, ?)",
+                    (self._INFO_START_MESSAGE_KEY, _normalize_offer_text(message_text)),
+                )
+            conn.commit()
+
+    def get_special_offers_header(self, fallback: str = "") -> str:
+        value = self._get_setting(self._SPECIAL_OFFERS_HEADER_KEY, fallback)
+        return _normalize_offer_text(value) or _normalize_offer_text(fallback)
 
     def set_special_offers_header(self, value: str) -> None:
+        self._set_setting(self._SPECIAL_OFFERS_HEADER_KEY, value)
+
+    def get_info_start_message(self, fallback: str = "") -> str:
+        value = self._get_setting(self._INFO_START_MESSAGE_KEY, fallback)
+        return _normalize_offer_text(value) or _normalize_offer_text(fallback)
+
+    def set_info_start_message(self, value: str) -> None:
+        self._set_setting(self._INFO_START_MESSAGE_KEY, value)
+
+    def get_info_start_photo_file_id(self) -> str:
+        return _normalize_offer_text(self._get_setting(self._INFO_START_PHOTO_FILE_ID_KEY, ""))
+
+    def set_info_start_photo_file_id(self, value: str) -> None:
+        self._set_setting(self._INFO_START_PHOTO_FILE_ID_KEY, value)
+
+    def _get_setting(self, key: str, fallback: str = "") -> str:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT value FROM offer_settings WHERE key=?",
+                (key,),
+            )
+            row = cur.fetchone()
+        return _normalize_offer_text(row[0]) if row else _normalize_offer_text(fallback)
+
+    def _set_setting(self, key: str, value: str) -> None:
         normalized = _normalize_offer_text(value)
         with self._connect() as conn:
             conn.execute(
@@ -579,7 +620,7 @@ class SQLiteStateStore:
                 ON CONFLICT(key) DO UPDATE SET
                     value=excluded.value
                 """,
-                (self._SPECIAL_OFFERS_HEADER_KEY, normalized),
+                (key, normalized),
             )
             conn.commit()
 

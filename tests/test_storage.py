@@ -146,3 +146,17 @@ def test_special_offers_templates_can_be_seeded_and_updated(tmp_path):
     assert store.delete_offer_template(offers[0].id) is True
     reordered = store.list_offer_templates()
     assert [offer.sort_order for offer in reordered] == [1, 2]
+
+
+def test_info_start_settings_can_be_seeded_and_updated(tmp_path):
+    store = SQLiteStateStore(str(tmp_path))
+
+    store.ensure_info_start_defaults("Стартовый текст")
+    assert store.get_info_start_message() == "Стартовый текст"
+    assert store.get_info_start_photo_file_id() == ""
+
+    store.set_info_start_message("Новый стартовый текст")
+    store.set_info_start_photo_file_id("photo-file-id")
+
+    assert store.get_info_start_message() == "Новый стартовый текст"
+    assert store.get_info_start_photo_file_id() == "photo-file-id"

@@ -3,6 +3,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TelegramError
 
 logger = logging.getLogger("golden-dent")
 
@@ -227,22 +228,42 @@ async def send_start_message(bot, chat_id: int) -> None:
     await bot.send_message(chat_id=chat_id, text=START_MESSAGE, reply_markup=build_main_keyboard())
 
 
-async def send_info_start_message(bot, chat_id: int) -> None:
+async def send_info_start_message(
+    bot,
+    chat_id: int,
+    message_text: str | None = None,
+    photo_file_id: str | None = None,
+    keyboard: InlineKeyboardMarkup | None = None,
+) -> None:
+    caption = message_text if message_text is not None else INFO_START_MESSAGE
+    reply_markup = keyboard if keyboard is not None else build_info_start_keyboard()
+    if photo_file_id:
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_file_id,
+                caption=caption,
+                reply_markup=reply_markup,
+            )
+            return
+        except TelegramError as exc:
+            logger.warning("Failed to send start photo by file_id: %s", exc)
+
     if _LOGO_PATH.exists():
         with _LOGO_PATH.open("rb") as logo:
             await bot.send_photo(
                 chat_id=chat_id,
                 photo=logo,
-                caption=INFO_START_MESSAGE,
-                reply_markup=build_info_start_keyboard(),
+                caption=caption,
+                reply_markup=reply_markup,
             )
         return
 
     logger.warning("Start logo file not found: %s", _LOGO_PATH)
     await bot.send_message(
         chat_id=chat_id,
-        text=INFO_START_MESSAGE,
-        reply_markup=build_info_start_keyboard(),
+        text=caption,
+        reply_markup=reply_markup,
     )
 
 
