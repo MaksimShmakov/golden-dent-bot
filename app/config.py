@@ -16,10 +16,10 @@ class Settings(BaseSettings):
     google_appointments_tab: str = "Записи для бота"
     google_undelivered_tab: str = "Не доставлено"
     google_clients_tab: str = "БД - клиенты"
+    google_admins_tab: str = "Список админов"
 
     tz: str = "Asia/Novosibirsk"
     daily_reminder_hour: int = 9
     daily_reminder_minute: int = 0
 
     data_dir: str = "/data"
-    admin_usernames: str = "GoldenDentNSK"

@@ -134,6 +134,11 @@ class SheetsClient:
         rows = ws.get_all_values()
         yield from _iter_sheet_entries(rows)
 
+    def list_admin_usernames(self, tab_name: str) -> list[str]:
+        ws = self._sheet.worksheet(tab_name)
+        rows = ws.get_all_values()
+        return _parse_admin_usernames(rows)
+
 
 def _iter_sheet_entries(rows: list[list[str]]) -> Iterable[SheetEntry]:
     for row_number, row in enumerate(rows[1:], start=2):
@@ -182,6 +187,18 @@ def _iter_sheet_entries(rows: list[list[str]]) -> Iterable[SheetEntry]:
             )
         if periodic_6m:
             yield periodic_6m
+
+
+def _parse_admin_usernames(rows: list[list[str]]) -> list[str]:
+    usernames: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        value = _normalize_username(_cell_value(row, 0))
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        usernames.append(value)
+    return usernames
 
 
 def _build_appointment_entry(row_number: int, row: list[str]) -> SheetEntry | None:
@@ -263,6 +280,17 @@ def _cell_value(row: list[str], index: int) -> str:
     if len(row) <= index:
         return ""
     return row[index].strip()
+
+
+def _normalize_username(value: str) -> str:
+    normalized = value.strip().lower()
+    if not normalized:
+        return ""
+    if normalized in {"tg_username", "username", "@username"}:
+        return ""
+    if not normalized.startswith("@"):
+        normalized = f"@{normalized}"
+    return normalized
 
 
 def _normalize_status_column(status_column: str | None) -> str:

@@ -60,6 +60,9 @@ _BROADCAST_STATE_KEY = "broadcast_state"
 _BROADCAST_DRAFT_KEY = "broadcast_draft"
 _OFFERS_ADMIN_STATE_KEY = "offers_admin_state"
 _OFFERS_ADMIN_DRAFT_KEY = "offers_admin_draft"
+_ADMINS_CACHE_KEY = "admin_usernames_cache"
+_ADMINS_CACHE_AT_KEY = "admin_usernames_cache_at"
+_ADMINS_CACHE_TTL = timedelta(seconds=60)
 
 
 def build_application(
@@ -1205,26 +1208,38 @@ def _normalize_admin_username(value: str) -> str:
     return normalized
 
 
-def _get_configured_admin_usernames(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
-    config = context.application.bot_data.get("config")
-    raw_value = getattr(config, "admin_usernames", "")
-    tokens = [
-        token.strip()
-        for chunk in str(raw_value).replace(";", ",").split(",")
-        for token in chunk.split()
-    ]
-    return {
-        normalized
-        for token in tokens
-        if (normalized := _normalize_admin_username(token))
-    }
+def _get_sheet_admin_usernames(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
+    bot_data = context.application.bot_data
+    cached_at = bot_data.get(_ADMINS_CACHE_AT_KEY)
+    cached_usernames = bot_data.get(_ADMINS_CACHE_KEY)
+    now = datetime.utcnow()
+
+    if isinstance(cached_at, datetime) and isinstance(cached_usernames, set):
+        if now - cached_at <= _ADMINS_CACHE_TTL:
+            return cached_usernames
+
+    sheets: SheetsClient = bot_data["sheets"]
+    admins_tab = bot_data["config"].google_admins_tab
+    try:
+        usernames = {
+            normalized
+            for username in sheets.list_admin_usernames(admins_tab)
+            if (normalized := _normalize_admin_username(username))
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load admin usernames from sheet %s: %s", admins_tab, exc)
+        return cached_usernames if isinstance(cached_usernames, set) else set()
+
+    bot_data[_ADMINS_CACHE_KEY] = usernames
+    bot_data[_ADMINS_CACHE_AT_KEY] = now
+    return usernames
 
 
 def _is_admin_user(username: str | None, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not username:
         return False
     normalized = _normalize_admin_username(username)
-    return normalized in _get_configured_admin_usernames(context)
+    return normalized in _get_sheet_admin_usernames(context)
 
 
 async def _ensure_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:

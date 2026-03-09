@@ -1,4 +1,9 @@
-from app.sheets import _iter_sheet_entries, _parse_datetime, _parse_reminder_months
+from app.sheets import (
+    _iter_sheet_entries,
+    _parse_admin_usernames,
+    _parse_datetime,
+    _parse_reminder_months,
+)
 
 
 def test_parse_datetime_with_time():
@@ -81,3 +86,15 @@ def test_iter_sheet_entries_generates_periodic_from_appointment_columns():
     assert entries[2].reminder_months == 6
     assert entries[2].status_column == "L"
     assert entries[2].username == "@appointment"
+
+
+def test_parse_admin_usernames_normalizes_and_deduplicates():
+    rows = [
+        ["tg_username"],
+        ["AdminOne"],
+        ["@AdminTwo"],
+        ["adminone"],
+        [""],
+    ]
+
+    assert _parse_admin_usernames(rows) == ["@adminone", "@admintwo"]
