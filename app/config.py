@@ -22,3 +22,4 @@ class Settings(BaseSettings):
     daily_reminder_minute: int = 0
 
     data_dir: str = "/data"
+    admin_usernames: str = "GoldenDentNSK"

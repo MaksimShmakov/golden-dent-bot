@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -36,7 +37,19 @@ class UndeliveredEvent:
     exported_at: str | None
 
 
+@dataclass
+class OfferTemplate:
+    id: int
+    legacy_key: str
+    sort_order: int
+    button_text: str
+    message_text: str
+    action_buttons: list[tuple[str, str]]
+
+
 class SQLiteStateStore:
+    _SPECIAL_OFFERS_HEADER_KEY = "special_offers_header"
+
     def __init__(self, data_dir: str) -> None:
         self._path = Path(data_dir) / "state.sqlite"
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,9 +122,30 @@ class SQLiteStateStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS offer_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS offer_template (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    legacy_key TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL,
+                    button_text TEXT NOT NULL,
+                    message_text TEXT NOT NULL,
+                    action_buttons_json TEXT NOT NULL DEFAULT '[]'
+                )
+                """
+            )
             self._migrate_pending_comment_schema(conn)
             self._migrate_client_map_schema(conn)
             self._migrate_reminder_context_schema(conn)
+            self._migrate_offer_template_schema(conn)
             self._migrate_clients_from_user_map(conn)
             conn.commit()
 
@@ -144,6 +178,19 @@ class SQLiteStateStore:
         if "status_column" not in columns:
             conn.execute(
                 "ALTER TABLE reminder_context ADD COLUMN status_column TEXT NOT NULL DEFAULT 'C'"
+            )
+
+    def _migrate_offer_template_schema(self, conn: sqlite3.Connection) -> None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(offer_template)").fetchall()}
+        if not columns:
+            return
+        if "legacy_key" not in columns:
+            conn.execute("ALTER TABLE offer_template ADD COLUMN legacy_key TEXT NOT NULL DEFAULT ''")
+        if "sort_order" not in columns:
+            conn.execute("ALTER TABLE offer_template ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+        if "action_buttons_json" not in columns:
+            conn.execute(
+                "ALTER TABLE offer_template ADD COLUMN action_buttons_json TEXT NOT NULL DEFAULT '[]'"
             )
 
     def _migrate_clients_from_user_map(self, conn: sqlite3.Connection) -> None:
@@ -461,6 +508,228 @@ class SQLiteStateStore:
             row = cur.fetchone()
         return row[0] if row else None
 
+    def ensure_special_offers_defaults(
+        self,
+        header: str,
+        offers: list[dict[str, object]],
+    ) -> None:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT value FROM offer_settings WHERE key=?",
+                (self._SPECIAL_OFFERS_HEADER_KEY,),
+            )
+            header_row = cur.fetchone()
+            if not header_row:
+                conn.execute(
+                    "INSERT INTO offer_settings (key, value) VALUES (?, ?)",
+                    (self._SPECIAL_OFFERS_HEADER_KEY, _normalize_offer_text(header)),
+                )
+
+            cur = conn.execute("SELECT COUNT(1) FROM offer_template")
+            offer_count = int(cur.fetchone()[0])
+            if offer_count == 0:
+                for index, offer in enumerate(offers, start=1):
+                    button_text = _normalize_offer_text(offer.get("button_text"))
+                    message_text = _normalize_offer_text(offer.get("message_text"))
+                    legacy_key = _normalize_legacy_key(offer.get("legacy_key"))
+                    action_buttons = _normalize_offer_buttons(
+                        offer.get("action_buttons", []),
+                    )
+                    if not button_text or not message_text:
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO offer_template (
+                            legacy_key,
+                            sort_order,
+                            button_text,
+                            message_text,
+                            action_buttons_json
+                        )
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            legacy_key,
+                            index,
+                            button_text,
+                            message_text,
+                            _serialize_offer_buttons(action_buttons),
+                        ),
+                    )
+            conn.commit()
+
+    def get_special_offers_header(self, fallback: str = "") -> str:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT value FROM offer_settings WHERE key=?",
+                (self._SPECIAL_OFFERS_HEADER_KEY,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return _normalize_offer_text(fallback)
+        return _normalize_offer_text(row[0]) or _normalize_offer_text(fallback)
+
+    def set_special_offers_header(self, value: str) -> None:
+        normalized = _normalize_offer_text(value)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO offer_settings (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value
+                """,
+                (self._SPECIAL_OFFERS_HEADER_KEY, normalized),
+            )
+            conn.commit()
+
+    def list_offer_templates(self) -> list[OfferTemplate]:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT id, legacy_key, sort_order, button_text, message_text, action_buttons_json
+                FROM offer_template
+                ORDER BY sort_order, id
+                """
+            )
+            rows = cur.fetchall()
+        return [_offer_row_to_dataclass(row) for row in rows]
+
+    def get_offer_template(self, offer_id: int) -> OfferTemplate | None:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT id, legacy_key, sort_order, button_text, message_text, action_buttons_json
+                FROM offer_template
+                WHERE id=?
+                """,
+                (offer_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return _offer_row_to_dataclass(row)
+
+    def get_offer_template_by_legacy_key(self, legacy_key: str) -> OfferTemplate | None:
+        normalized_legacy_key = _normalize_legacy_key(legacy_key)
+        if not normalized_legacy_key:
+            return None
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT id, legacy_key, sort_order, button_text, message_text, action_buttons_json
+                FROM offer_template
+                WHERE legacy_key=?
+                LIMIT 1
+                """,
+                (normalized_legacy_key,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return _offer_row_to_dataclass(row)
+
+    def add_offer_template(
+        self,
+        button_text: str,
+        message_text: str,
+        action_buttons: list[tuple[str, str]],
+        legacy_key: str = "",
+    ) -> int:
+        normalized_button_text = _normalize_offer_text(button_text)
+        normalized_message_text = _normalize_offer_text(message_text)
+        normalized_legacy_key = _normalize_legacy_key(legacy_key)
+        normalized_buttons = _normalize_offer_buttons(action_buttons)
+        if not normalized_button_text:
+            raise ValueError("button_text must not be empty")
+        if not normalized_message_text:
+            raise ValueError("message_text must not be empty")
+        with self._connect() as conn:
+            cur = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM offer_template")
+            next_sort_order = int(cur.fetchone()[0])
+            cur = conn.execute(
+                """
+                INSERT INTO offer_template (
+                    legacy_key,
+                    sort_order,
+                    button_text,
+                    message_text,
+                    action_buttons_json
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_legacy_key,
+                    next_sort_order,
+                    normalized_button_text,
+                    normalized_message_text,
+                    _serialize_offer_buttons(normalized_buttons),
+                ),
+            )
+            conn.commit()
+        return int(cur.lastrowid)
+
+    def update_offer_template(
+        self,
+        offer_id: int,
+        *,
+        button_text: str | None = None,
+        message_text: str | None = None,
+        action_buttons: list[tuple[str, str]] | None = None,
+    ) -> bool:
+        current = self.get_offer_template(offer_id)
+        if not current:
+            return False
+
+        next_button_text = current.button_text
+        if button_text is not None:
+            next_button_text = _normalize_offer_text(button_text)
+        next_message_text = current.message_text
+        if message_text is not None:
+            next_message_text = _normalize_offer_text(message_text)
+        next_action_buttons = current.action_buttons
+        if action_buttons is not None:
+            next_action_buttons = _normalize_offer_buttons(action_buttons)
+
+        if not next_button_text:
+            raise ValueError("button_text must not be empty")
+        if not next_message_text:
+            raise ValueError("message_text must not be empty")
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE offer_template
+                SET button_text=?, message_text=?, action_buttons_json=?
+                WHERE id=?
+                """,
+                (
+                    next_button_text,
+                    next_message_text,
+                    _serialize_offer_buttons(next_action_buttons),
+                    offer_id,
+                ),
+            )
+            conn.commit()
+        return True
+
+    def delete_offer_template(self, offer_id: int) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM offer_template WHERE id=?", (offer_id,))
+            deleted = cur.rowcount > 0
+            if deleted:
+                self._reorder_offer_templates(conn)
+            conn.commit()
+        return deleted
+
+    def _reorder_offer_templates(self, conn: sqlite3.Connection) -> None:
+        cur = conn.execute("SELECT id FROM offer_template ORDER BY sort_order, id")
+        for index, row in enumerate(cur.fetchall(), start=1):
+            conn.execute(
+                "UPDATE offer_template SET sort_order=? WHERE id=?",
+                (index, row[0]),
+            )
+
     def add_undelivered_event(
         self,
         created_at: datetime,
@@ -584,3 +853,68 @@ def _normalize_status_column(status_column: str | None) -> str:
     if not normalized or not normalized.isalpha():
         return "C"
     return normalized
+
+
+def _normalize_offer_text(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _normalize_legacy_key(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+def _normalize_offer_buttons(value: object) -> list[tuple[str, str]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[tuple[str, str]] = []
+    for raw_button in value:
+        if not isinstance(raw_button, (list, tuple)) or len(raw_button) != 2:
+            continue
+        text = _normalize_offer_text(raw_button[0])
+        url = _normalize_offer_text(raw_button[1])
+        if not text or not url:
+            continue
+        normalized.append((text, url))
+    return normalized[:10]
+
+
+def _serialize_offer_buttons(buttons: list[tuple[str, str]]) -> str:
+    payload = [{"text": text, "url": url} for text, url in buttons]
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _deserialize_offer_buttons(payload: str) -> list[tuple[str, str]]:
+    if not payload:
+        return []
+    try:
+        raw_buttons = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(raw_buttons, list):
+        return []
+    normalized: list[tuple[str, str]] = []
+    for raw_button in raw_buttons:
+        if not isinstance(raw_button, dict):
+            continue
+        text = _normalize_offer_text(raw_button.get("text"))
+        url = _normalize_offer_text(raw_button.get("url"))
+        if not text or not url:
+            continue
+        normalized.append((text, url))
+    return normalized[:10]
+
+
+def _offer_row_to_dataclass(row: tuple) -> OfferTemplate:
+    return OfferTemplate(
+        id=int(row[0]),
+        legacy_key=_normalize_legacy_key(row[1]),
+        sort_order=int(row[2]),
+        button_text=_normalize_offer_text(row[3]),
+        message_text=_normalize_offer_text(row[4]),
+        action_buttons=_deserialize_offer_buttons(str(row[5])),
+    )

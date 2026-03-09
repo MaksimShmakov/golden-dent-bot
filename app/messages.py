@@ -246,22 +246,29 @@ async def send_info_start_message(bot, chat_id: int) -> None:
     )
 
 
-async def send_special_offers_message(bot, chat_id: int) -> None:
+async def send_special_offers_message(
+    bot,
+    chat_id: int,
+    header: str | None = None,
+    keyboard: InlineKeyboardMarkup | None = None,
+) -> None:
+    message_header = header if header is not None else SPECIAL_OFFERS_HEADER
+    reply_markup = keyboard if keyboard is not None else build_special_offers_keyboard()
     if _SPECIAL_SUG_PATH.exists():
         with _SPECIAL_SUG_PATH.open("rb") as image:
             await bot.send_photo(
                 chat_id=chat_id,
                 photo=image,
-                caption=SPECIAL_OFFERS_HEADER,
-                reply_markup=build_special_offers_keyboard(),
+                caption=message_header,
+                reply_markup=reply_markup,
             )
         return
 
     logger.warning("Special offers image file not found: %s", _SPECIAL_SUG_PATH)
     await bot.send_message(
         chat_id=chat_id,
-        text=SPECIAL_OFFERS_HEADER,
-        reply_markup=build_special_offers_keyboard(),
+        text=message_header,
+        reply_markup=reply_markup,
     )
 
 

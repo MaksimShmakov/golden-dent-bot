@@ -93,3 +93,56 @@ def test_reset_user_state_clears_user_related_data(tmp_path):
     assert store.get_reminder_context(42) is None
     assert list(store.list_pending()) == []
     assert store.mark_activated(42, now) is True
+
+
+def test_special_offers_templates_can_be_seeded_and_updated(tmp_path):
+    store = SQLiteStateStore(str(tmp_path))
+
+    store.ensure_special_offers_defaults(
+        header="Сезонные акции",
+        offers=[
+            {
+                "legacy_key": "adult",
+                "button_text": "Взрослый абонемент",
+                "message_text": "Описание 1",
+                "action_buttons": [("Записаться", "https://example.com/1")],
+            },
+            {
+                "legacy_key": "child",
+                "button_text": "Детский абонемент",
+                "message_text": "Описание 2",
+                "action_buttons": [("Записаться", "https://example.com/2")],
+            },
+        ],
+    )
+
+    assert store.get_special_offers_header() == "Сезонные акции"
+    offers = store.list_offer_templates()
+    assert len(offers) == 2
+    assert offers[0].legacy_key == "adult"
+    assert offers[1].button_text == "Детский абонемент"
+    assert store.get_offer_template_by_legacy_key("adult") is not None
+
+    new_offer_id = store.add_offer_template(
+        button_text="Имплантация",
+        message_text="Описание 3",
+        action_buttons=[("Подробнее", "https://example.com/3")],
+    )
+    added = store.get_offer_template(new_offer_id)
+    assert added is not None
+    assert added.sort_order == 3
+
+    assert store.update_offer_template(
+        new_offer_id,
+        button_text="Имплантация + коронка",
+        message_text="Новое описание 3",
+        action_buttons=[("Записаться", "https://example.com/new")],
+    )
+    updated = store.get_offer_template(new_offer_id)
+    assert updated is not None
+    assert updated.button_text == "Имплантация + коронка"
+    assert updated.action_buttons == [("Записаться", "https://example.com/new")]
+
+    assert store.delete_offer_template(offers[0].id) is True
+    reordered = store.list_offer_templates()
+    assert [offer.sort_order for offer in reordered] == [1, 2]

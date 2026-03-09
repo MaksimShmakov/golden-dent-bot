@@ -29,11 +29,13 @@ from app.messages import (
     CHILD_SUBSCRIPTION_TEXT,
     FLASH_WHITENING_TEXT,
     IMPLANT_CROWN_TEXT,
+    SPECIAL_OFFERS_HEADER,
     ULTRASOUND_EXTRACTION_TEXT,
     build_adult_subscription_keyboard,
     build_child_subscription_keyboard,
     build_flash_contact_keyboard,
     build_implant_contact_keyboard,
+    build_special_offers_keyboard,
     build_ultrasound_contact_keyboard,
     send_about_message,
     send_info_start_message,
@@ -43,7 +45,7 @@ from app.messages import (
 )
 from app.scheduler import send_daily_messages
 from app.sheets import SheetsClient
-from app.storage import SQLiteStateStore
+from app.storage import OfferTemplate, SQLiteStateStore
 
 logger = logging.getLogger("golden-dent")
 
@@ -56,6 +58,8 @@ _CANCEL_REASON_LABELS = {
 _PENDING_ACTION_COLLECT_FULL_NAME = "collect_full_name"
 _BROADCAST_STATE_KEY = "broadcast_state"
 _BROADCAST_DRAFT_KEY = "broadcast_draft"
+_OFFERS_ADMIN_STATE_KEY = "offers_admin_state"
+_OFFERS_ADMIN_DRAFT_KEY = "offers_admin_draft"
 
 
 def build_application(
@@ -72,6 +76,10 @@ def build_application(
     application.bot_data["store"] = store
     application.bot_data["scheduler"] = scheduler
     application.bot_data["config"] = config
+    store.ensure_special_offers_defaults(
+        header=SPECIAL_OFFERS_HEADER,
+        offers=_build_default_offer_templates(),
+    )
 
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("test_main", test_main_cmd))
@@ -80,6 +88,8 @@ def build_application(
     application.add_handler(CommandHandler("test_reset", test_reset_cmd))
     application.add_handler(CommandHandler("broadcast", broadcast_cmd))
     application.add_handler(CommandHandler("broadcast_cancel", broadcast_cancel_cmd))
+    application.add_handler(CommandHandler("offers_admin", offers_admin_cmd))
+    application.add_handler(CommandHandler("offers_admin_cancel", offers_admin_cancel_cmd))
     application.add_handler(CommandHandler("whoami", whoami_cmd))
 
     application.add_handler(
@@ -101,6 +111,19 @@ def build_application(
     application.add_handler(CallbackQueryHandler(go_start_cb, pattern="^go_start$"))
     application.add_handler(CallbackQueryHandler(about_us_cb, pattern="^about_us$"))
     application.add_handler(CallbackQueryHandler(special_offers_cb, pattern="^special_offers$"))
+    application.add_handler(
+        CallbackQueryHandler(
+            offers_admin_action_cb,
+            pattern=r"^offers_admin:(header|add|edit|delete|preview|done)$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(offers_admin_edit_select_cb, pattern=r"^offers_admin_edit:\d+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(offers_admin_delete_cb, pattern=r"^offers_admin_delete:\d+$")
+    )
+    application.add_handler(CallbackQueryHandler(offer_dynamic_cb, pattern=r"^offer_dynamic:\d+$"))
     application.add_handler(CallbackQueryHandler(offer_adult_cb, pattern="^offer_adult$"))
     application.add_handler(CallbackQueryHandler(offer_child_cb, pattern="^offer_child$"))
     application.add_handler(CallbackQueryHandler(offer_implant_cb, pattern="^offer_implant$"))
@@ -294,6 +317,9 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.effective_user or not update.effective_chat:
         return
     _record_user(update, context)
+    if not await _ensure_admin(update, context):
+        return
+    _clear_offers_admin_flow(context)
     _start_broadcast_flow(context)
     await update.effective_chat.send_message(
         "Шаг 1/5. Пришлите фото для рассылки или напишите `пропустить`.",
@@ -302,12 +328,38 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def broadcast_cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat:
+    if not update.effective_chat or not update.effective_user:
+        return
+    _record_user(update, context)
+    if not await _ensure_admin(update, context):
         return
     if _clear_broadcast_flow(context):
         await update.effective_chat.send_message("Кастомная рассылка отменена.")
         return
     await update.effective_chat.send_message("Сейчас нет активной кастомной рассылки.")
+
+
+async def offers_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_user:
+        return
+    _record_user(update, context)
+    if not await _ensure_admin(update, context):
+        return
+    _clear_broadcast_flow(context)
+    _clear_offers_admin_flow(context)
+    await _send_offers_admin_panel(update.effective_chat.id, context, include_hint=True)
+
+
+async def offers_admin_cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_user:
+        return
+    _record_user(update, context)
+    if not await _ensure_admin(update, context):
+        return
+    if _clear_offers_admin_flow(context):
+        await update.effective_chat.send_message("Редактирование акций отменено.")
+        return
+    await update.effective_chat.send_message("Сейчас нет активного режима редактирования акций.")
 
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -502,7 +554,26 @@ async def special_offers_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     _record_user(update, context)
     await query.answer()
-    await send_special_offers_message(context.bot, query.message.chat.id)
+    await _send_special_offers_menu(context.bot, query.message.chat.id, context)
+
+
+async def offer_dynamic_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    await query.answer()
+
+    offer_id = _parse_callback_row(query.data or "", "offer_dynamic")
+    if not offer_id:
+        await query.message.reply_text("Не удалось определить акцию.")
+        return
+    await _send_offer_template_by_id(
+        context.bot,
+        query.message.chat.id,
+        offer_id,
+        context,
+    )
 
 
 async def offer_adult_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -511,9 +582,13 @@ async def offer_adult_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     _record_user(update, context)
     await query.answer()
-    await query.message.reply_text(
-        ADULT_SUBSCRIPTION_TEXT,
-        reply_markup=build_adult_subscription_keyboard(),
+    await _send_legacy_offer(
+        context.bot,
+        query.message.chat.id,
+        context,
+        legacy_key="adult",
+        fallback_text=ADULT_SUBSCRIPTION_TEXT,
+        fallback_keyboard=build_adult_subscription_keyboard(),
     )
 
 
@@ -523,9 +598,13 @@ async def offer_child_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     _record_user(update, context)
     await query.answer()
-    await query.message.reply_text(
-        CHILD_SUBSCRIPTION_TEXT,
-        reply_markup=build_child_subscription_keyboard(),
+    await _send_legacy_offer(
+        context.bot,
+        query.message.chat.id,
+        context,
+        legacy_key="child",
+        fallback_text=CHILD_SUBSCRIPTION_TEXT,
+        fallback_keyboard=build_child_subscription_keyboard(),
     )
 
 
@@ -535,9 +614,13 @@ async def offer_implant_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     _record_user(update, context)
     await query.answer()
-    await query.message.reply_text(
-        IMPLANT_CROWN_TEXT,
-        reply_markup=build_implant_contact_keyboard(),
+    await _send_legacy_offer(
+        context.bot,
+        query.message.chat.id,
+        context,
+        legacy_key="implant",
+        fallback_text=IMPLANT_CROWN_TEXT,
+        fallback_keyboard=build_implant_contact_keyboard(),
     )
 
 
@@ -547,9 +630,13 @@ async def offer_ultrasound_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     _record_user(update, context)
     await query.answer()
-    await query.message.reply_text(
-        ULTRASOUND_EXTRACTION_TEXT,
-        reply_markup=build_ultrasound_contact_keyboard(),
+    await _send_legacy_offer(
+        context.bot,
+        query.message.chat.id,
+        context,
+        legacy_key="ultrasound",
+        fallback_text=ULTRASOUND_EXTRACTION_TEXT,
+        fallback_keyboard=build_ultrasound_contact_keyboard(),
     )
 
 
@@ -559,10 +646,128 @@ async def offer_flash_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     _record_user(update, context)
     await query.answer()
-    await query.message.reply_text(
-        FLASH_WHITENING_TEXT,
-        reply_markup=build_flash_contact_keyboard(),
+    await _send_legacy_offer(
+        context.bot,
+        query.message.chat.id,
+        context,
+        legacy_key="flash",
+        fallback_text=FLASH_WHITENING_TEXT,
+        fallback_keyboard=build_flash_contact_keyboard(),
     )
+
+
+async def offers_admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    if not await _ensure_admin_query(query, context):
+        return
+    await query.answer()
+
+    action = (query.data or "").split(":", maxsplit=1)[1]
+    store: SQLiteStateStore = context.application.bot_data["store"]
+
+    if action == "header":
+        _set_offers_admin_state(context, "header")
+        context.user_data[_OFFERS_ADMIN_DRAFT_KEY] = {}
+        await query.message.reply_text("Отправьте новый заголовок для сообщения с акциями.")
+        return
+
+    if action == "add":
+        _set_offers_admin_state(context, "add_button_text")
+        context.user_data[_OFFERS_ADMIN_DRAFT_KEY] = {
+            "mode": "add",
+            "button_text": "",
+            "message_text": "",
+            "action_buttons": [],
+        }
+        await query.message.reply_text("Введите название кнопки новой акции.")
+        return
+
+    if action == "preview":
+        await _send_special_offers_menu(context.bot, query.message.chat.id, context)
+        await _send_offers_admin_panel(query.message.chat.id, context)
+        return
+
+    if action == "done":
+        _clear_offers_admin_flow(context)
+        await query.message.reply_text("Редактирование акций завершено.")
+        return
+
+    offers = store.list_offer_templates()
+    if not offers:
+        await query.message.reply_text("Пока нет акций для редактирования.")
+        return
+
+    if action == "edit":
+        await query.message.reply_text(
+            "Выберите акцию для изменения:",
+            reply_markup=_build_offers_admin_offer_list_keyboard(offers, mode="edit"),
+        )
+        return
+
+    if action == "delete":
+        await query.message.reply_text(
+            "Выберите акцию для удаления:",
+            reply_markup=_build_offers_admin_offer_list_keyboard(offers, mode="delete"),
+        )
+        return
+
+
+async def offers_admin_edit_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    if not await _ensure_admin_query(query, context):
+        return
+    await query.answer()
+
+    offer_id = _parse_callback_row(query.data or "", "offers_admin_edit")
+    if not offer_id:
+        await query.message.reply_text("Не удалось определить акцию.")
+        return
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    offer = store.get_offer_template(offer_id)
+    if not offer:
+        await query.message.reply_text("Акция не найдена.")
+        return
+
+    context.user_data[_OFFERS_ADMIN_DRAFT_KEY] = {
+        "mode": "edit",
+        "offer_id": offer.id,
+        "button_text": offer.button_text,
+        "message_text": offer.message_text,
+        "action_buttons": offer.action_buttons,
+    }
+    _set_offers_admin_state(context, "edit_button_text")
+    await query.message.reply_text(
+        "Введите новый текст кнопки акции или напишите `пропустить`.",
+    )
+
+
+async def offers_admin_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    _record_user(update, context)
+    if not await _ensure_admin_query(query, context):
+        return
+    await query.answer()
+
+    offer_id = _parse_callback_row(query.data or "", "offers_admin_delete")
+    if not offer_id:
+        await query.message.reply_text("Не удалось определить акцию.")
+        return
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    if not store.delete_offer_template(offer_id):
+        await query.message.reply_text("Акция не найдена или уже удалена.")
+        return
+    await query.message.reply_text("Акция удалена.")
+    await _send_offers_admin_panel(query.message.chat.id, context)
 
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -632,6 +837,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     _record_user(update, context)
     text = update.message.text.strip()
+
+    if await _handle_offers_admin_text(update, context, text):
+        return
 
     if await _handle_broadcast_text(update, context, text):
         return
@@ -785,6 +993,452 @@ async def _request_full_name_if_needed(update: Update, context: ContextTypes.DEF
         "Пожалуйста, напишите ФИО в формате: Фамилия Имя Отчество."
     )
     return True
+
+
+def _build_default_offer_templates() -> list[dict[str, object]]:
+    labels = [row[0].text for row in build_special_offers_keyboard().inline_keyboard if row]
+    adult_label = labels[0] if len(labels) > 0 else "Акция 1"
+    child_label = labels[1] if len(labels) > 1 else "Акция 2"
+    implant_label = labels[2] if len(labels) > 2 else "Акция 3"
+    ultrasound_label = labels[3] if len(labels) > 3 else "Акция 4"
+    flash_label = labels[4] if len(labels) > 4 else "Акция 5"
+    return [
+        {
+            "legacy_key": "adult",
+            "button_text": adult_label,
+            "message_text": ADULT_SUBSCRIPTION_TEXT,
+            "action_buttons": _extract_offer_url_buttons(build_adult_subscription_keyboard()),
+        },
+        {
+            "legacy_key": "child",
+            "button_text": child_label,
+            "message_text": CHILD_SUBSCRIPTION_TEXT,
+            "action_buttons": _extract_offer_url_buttons(build_child_subscription_keyboard()),
+        },
+        {
+            "legacy_key": "implant",
+            "button_text": implant_label,
+            "message_text": IMPLANT_CROWN_TEXT,
+            "action_buttons": _extract_offer_url_buttons(build_implant_contact_keyboard()),
+        },
+        {
+            "legacy_key": "ultrasound",
+            "button_text": ultrasound_label,
+            "message_text": ULTRASOUND_EXTRACTION_TEXT,
+            "action_buttons": _extract_offer_url_buttons(build_ultrasound_contact_keyboard()),
+        },
+        {
+            "legacy_key": "flash",
+            "button_text": flash_label,
+            "message_text": FLASH_WHITENING_TEXT,
+            "action_buttons": _extract_offer_url_buttons(build_flash_contact_keyboard()),
+        },
+    ]
+
+
+def _extract_offer_url_buttons(keyboard: InlineKeyboardMarkup) -> list[tuple[str, str]]:
+    buttons: list[tuple[str, str]] = []
+    for row in keyboard.inline_keyboard:
+        for button in row:
+            if button.url:
+                buttons.append((button.text, button.url))
+    return buttons
+
+
+def _build_special_offers_dynamic_keyboard(offers: list[OfferTemplate]) -> InlineKeyboardMarkup:
+    if not offers:
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("В начало", callback_data="go_start")]]
+        )
+    rows = [
+        [InlineKeyboardButton(offer.button_text, callback_data=f"offer_dynamic:{offer.id}")]
+        for offer in offers
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_offer_actions_keyboard(action_buttons: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(label, url=url)] for label, url in action_buttons]
+    rows.append([InlineKeyboardButton("В начало", callback_data="go_start")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _send_offer_template_payload(bot, chat_id: int, offer: OfferTemplate) -> None:
+    await bot.send_message(
+        chat_id=chat_id,
+        text=offer.message_text,
+        reply_markup=_build_offer_actions_keyboard(offer.action_buttons),
+    )
+
+
+async def _send_offer_template_by_id(
+    bot,
+    chat_id: int,
+    offer_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    offer = store.get_offer_template(offer_id)
+    if not offer:
+        await bot.send_message(chat_id=chat_id, text="Акция не найдена.")
+        return
+    await _send_offer_template_payload(bot, chat_id, offer)
+
+
+async def _send_legacy_offer(
+    bot,
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    legacy_key: str,
+    fallback_text: str,
+    fallback_keyboard: InlineKeyboardMarkup,
+) -> None:
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    offer = store.get_offer_template_by_legacy_key(legacy_key)
+    if offer:
+        await _send_offer_template_payload(bot, chat_id, offer)
+        return
+    await bot.send_message(
+        chat_id=chat_id,
+        text=fallback_text,
+        reply_markup=fallback_keyboard,
+    )
+
+
+async def _send_special_offers_menu(
+    bot,
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    offers = store.list_offer_templates()
+    await send_special_offers_message(
+        bot,
+        chat_id,
+        header=store.get_special_offers_header(SPECIAL_OFFERS_HEADER),
+        keyboard=_build_special_offers_dynamic_keyboard(offers),
+    )
+
+
+def _build_offers_admin_panel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Изменить заголовок", callback_data="offers_admin:header")],
+            [InlineKeyboardButton("Добавить акцию", callback_data="offers_admin:add")],
+            [InlineKeyboardButton("Изменить акцию", callback_data="offers_admin:edit")],
+            [InlineKeyboardButton("Удалить акцию", callback_data="offers_admin:delete")],
+            [InlineKeyboardButton("Предпросмотр", callback_data="offers_admin:preview")],
+            [InlineKeyboardButton("Завершить", callback_data="offers_admin:done")],
+        ]
+    )
+
+
+def _build_offers_admin_offer_list_keyboard(
+    offers: list[OfferTemplate],
+    mode: str,
+) -> InlineKeyboardMarkup:
+    prefix = "offers_admin_edit" if mode == "edit" else "offers_admin_delete"
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{index}. {offer.button_text}",
+                callback_data=f"{prefix}:{offer.id}",
+            )
+        ]
+        for index, offer in enumerate(offers, start=1)
+    ]
+    rows.append([InlineKeyboardButton("Завершить", callback_data="offers_admin:done")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _send_offers_admin_panel(
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    include_hint: bool = False,
+) -> None:
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    offers = store.list_offer_templates()
+    lines = [
+        "Панель управления акциями.",
+        f"Акций в меню: {len(offers)}",
+    ]
+    if include_hint:
+        lines.append("Выберите действие кнопками ниже.")
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="\n".join(lines),
+        reply_markup=_build_offers_admin_panel_keyboard(),
+    )
+
+
+def _set_offers_admin_state(context: ContextTypes.DEFAULT_TYPE, state: str) -> None:
+    context.user_data[_OFFERS_ADMIN_STATE_KEY] = state
+
+
+def _get_offers_admin_state(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    state = context.user_data.get(_OFFERS_ADMIN_STATE_KEY)
+    return state if isinstance(state, str) else None
+
+
+def _get_offers_admin_draft(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    draft = context.user_data.get(_OFFERS_ADMIN_DRAFT_KEY)
+    if isinstance(draft, dict):
+        return draft
+    context.user_data[_OFFERS_ADMIN_DRAFT_KEY] = {}
+    return context.user_data[_OFFERS_ADMIN_DRAFT_KEY]
+
+
+def _clear_offers_admin_flow(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    had_state = bool(context.user_data.pop(_OFFERS_ADMIN_STATE_KEY, None))
+    had_draft = bool(context.user_data.pop(_OFFERS_ADMIN_DRAFT_KEY, None))
+    return had_state or had_draft
+
+
+def _normalize_admin_username(value: str) -> str:
+    normalized = value.strip().lower()
+    if not normalized:
+        return ""
+    if not normalized.startswith("@"):
+        normalized = f"@{normalized}"
+    return normalized
+
+
+def _get_configured_admin_usernames(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
+    config = context.application.bot_data.get("config")
+    raw_value = getattr(config, "admin_usernames", "")
+    tokens = [
+        token.strip()
+        for chunk in str(raw_value).replace(";", ",").split(",")
+        for token in chunk.split()
+    ]
+    return {
+        normalized
+        for token in tokens
+        if (normalized := _normalize_admin_username(token))
+    }
+
+
+def _is_admin_user(username: str | None, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not username:
+        return False
+    normalized = _normalize_admin_username(username)
+    return normalized in _get_configured_admin_usernames(context)
+
+
+async def _ensure_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+    chat = update.effective_chat
+    if user and _is_admin_user(user.username, context):
+        return True
+    if chat:
+        await chat.send_message("Команда доступна только администраторам.")
+    return False
+
+
+async def _ensure_admin_query(query, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if query.from_user and _is_admin_user(query.from_user.username, context):
+        return True
+    await query.answer("Только для администраторов.", show_alert=True)
+    return False
+
+
+async def _handle_offers_admin_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> bool:
+    state = _get_offers_admin_state(context)
+    if not state or not update.message:
+        return False
+
+    if not await _ensure_admin(update, context):
+        _clear_offers_admin_flow(context)
+        return True
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    draft = _get_offers_admin_draft(context)
+    lowered = text.strip().lower()
+    skip_values = {"пропустить", "skip"}
+    cancel_values = {"отмена", "cancel", "/offers_admin_cancel"}
+    yes_values = {"да", "yes", "y"}
+    no_values = {"нет", "no", "n"}
+
+    if lowered in cancel_values:
+        _clear_offers_admin_flow(context)
+        await update.message.reply_text("Редактирование акций отменено.")
+        return True
+
+    if state == "header":
+        if not text:
+            await update.message.reply_text("Заголовок пустой. Отправьте текст заголовка.")
+            return True
+        store.set_special_offers_header(text)
+        _clear_offers_admin_flow(context)
+        await update.message.reply_text("Заголовок обновлён.")
+        if update.effective_chat:
+            await _send_offers_admin_panel(update.effective_chat.id, context)
+        return True
+
+    if state == "add_button_text":
+        if not text:
+            await update.message.reply_text("Название кнопки не может быть пустым.")
+            return True
+        draft["button_text"] = text
+        _set_offers_admin_state(context, "add_message_text")
+        await update.message.reply_text("Отправьте полный текст сообщения для этой акции.")
+        return True
+
+    if state == "add_message_text":
+        if not text:
+            await update.message.reply_text("Текст сообщения не может быть пустым.")
+            return True
+        draft["message_text"] = text
+        _set_offers_admin_state(context, "add_buttons_choice")
+        await update.message.reply_text("Нужны кнопки действий? Ответьте `да` или `нет`.")
+        return True
+
+    if state == "add_buttons_choice":
+        if lowered in no_values:
+            store.add_offer_template(
+                button_text=str(draft.get("button_text", "")),
+                message_text=str(draft.get("message_text", "")),
+                action_buttons=[],
+            )
+            _clear_offers_admin_flow(context)
+            await update.message.reply_text("Акция добавлена.")
+            if update.effective_chat:
+                await _send_offers_admin_panel(update.effective_chat.id, context)
+            return True
+        if lowered in yes_values:
+            _set_offers_admin_state(context, "add_buttons_input")
+            await update.message.reply_text(
+                "Отправьте кнопки, каждая с новой строки:\n"
+                "Текст кнопки | https://example.com\n"
+                "Или напишите `пропустить`.",
+            )
+            return True
+        await update.message.reply_text("Ответьте `да` или `нет`.")
+        return True
+
+    if state == "add_buttons_input":
+        action_buttons: list[tuple[str, str]]
+        if lowered in skip_values:
+            action_buttons = []
+        else:
+            action_buttons, error = _parse_broadcast_buttons(text)
+            if error:
+                await update.message.reply_text(error)
+                return True
+        store.add_offer_template(
+            button_text=str(draft.get("button_text", "")),
+            message_text=str(draft.get("message_text", "")),
+            action_buttons=action_buttons,
+        )
+        _clear_offers_admin_flow(context)
+        await update.message.reply_text("Акция добавлена.")
+        if update.effective_chat:
+            await _send_offers_admin_panel(update.effective_chat.id, context)
+        return True
+
+    if state == "edit_button_text":
+        if lowered not in skip_values:
+            if not text:
+                await update.message.reply_text(
+                    "Название кнопки не может быть пустым. Введите текст или `пропустить`."
+                )
+                return True
+            draft["button_text"] = text
+        _set_offers_admin_state(context, "edit_message_text")
+        await update.message.reply_text("Введите новый текст сообщения или `пропустить`.")
+        return True
+
+    if state == "edit_message_text":
+        if lowered not in skip_values:
+            if not text:
+                await update.message.reply_text(
+                    "Текст сообщения не может быть пустым. Введите текст или `пропустить`."
+                )
+                return True
+            draft["message_text"] = text
+        _set_offers_admin_state(context, "edit_buttons_choice")
+        await update.message.reply_text(
+            "Что сделать с кнопками действий?\n"
+            "`пропустить` - оставить как есть\n"
+            "`удалить` - убрать все кнопки\n"
+            "`изменить` - задать новые",
+        )
+        return True
+
+    if state == "edit_buttons_choice":
+        offer_id = int(draft.get("offer_id", 0))
+        if not offer_id:
+            _clear_offers_admin_flow(context)
+            await update.message.reply_text("Акция не найдена, начните заново через /offers_admin.")
+            return True
+
+        if lowered in skip_values:
+            store.update_offer_template(
+                offer_id,
+                button_text=str(draft.get("button_text", "")),
+                message_text=str(draft.get("message_text", "")),
+            )
+            _clear_offers_admin_flow(context)
+            await update.message.reply_text("Акция обновлена.")
+            if update.effective_chat:
+                await _send_offers_admin_panel(update.effective_chat.id, context)
+            return True
+        if lowered == "удалить":
+            store.update_offer_template(
+                offer_id,
+                button_text=str(draft.get("button_text", "")),
+                message_text=str(draft.get("message_text", "")),
+                action_buttons=[],
+            )
+            _clear_offers_admin_flow(context)
+            await update.message.reply_text("Акция обновлена.")
+            if update.effective_chat:
+                await _send_offers_admin_panel(update.effective_chat.id, context)
+            return True
+        if lowered == "изменить":
+            _set_offers_admin_state(context, "edit_buttons_input")
+            await update.message.reply_text(
+                "Отправьте кнопки, каждая с новой строки:\n"
+                "Текст кнопки | https://example.com\n"
+                "Или `пропустить`, чтобы оставить текущие.",
+            )
+            return True
+        await update.message.reply_text("Напишите `пропустить`, `удалить` или `изменить`.")
+        return True
+
+    if state == "edit_buttons_input":
+        offer_id = int(draft.get("offer_id", 0))
+        if not offer_id:
+            _clear_offers_admin_flow(context)
+            await update.message.reply_text("Акция не найдена, начните заново через /offers_admin.")
+            return True
+
+        action_buttons = draft.get("action_buttons", [])
+        if lowered not in skip_values:
+            action_buttons, error = _parse_broadcast_buttons(text)
+            if error:
+                await update.message.reply_text(error)
+                return True
+
+        store.update_offer_template(
+            offer_id,
+            button_text=str(draft.get("button_text", "")),
+            message_text=str(draft.get("message_text", "")),
+            action_buttons=action_buttons,
+        )
+        _clear_offers_admin_flow(context)
+        await update.message.reply_text("Акция обновлена.")
+        if update.effective_chat:
+            await _send_offers_admin_panel(update.effective_chat.id, context)
+        return True
+
+    return False
 
 
 def _start_broadcast_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
