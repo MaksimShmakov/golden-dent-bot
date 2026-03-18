@@ -201,14 +201,14 @@ async def test_daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_chat.send_message(
             "\n".join(
                 [
-                    "РўРµСЃС‚ РµР¶РµРґРЅРµРІРЅРѕР№ СЂР°СЃСЃС‹Р»РєРё Р·Р°РІРµСЂС€РµРЅ.",
+                    "Тест ежедневной рассылки завершен.",
                     f"Целевая дата: {target_date} (смещение: {days_ahead})",
-                    f"РЎС‚СЂРѕРє РѕР±СЂР°Р±РѕС‚Р°РЅРѕ: {stats['rows_total']}",
-                    f"РљР°РЅРґРёРґР°С‚С‹ (Р·Р°РїРёСЃСЊ РЅР° Р·Р°РІС‚СЂР°): {stats['appointment_candidates']}",
-                    f"РљР°РЅРґРёРґР°С‚С‹ (С…РёСЂСѓСЂРі РЅР° Р·Р°РІС‚СЂР°): {stats['surgeon_candidates']}",
-                    f"РљР°РЅРґРёРґР°С‚С‹ (РїРµСЂРёРѕРґРёС‡РµСЃРєРёРµ): {stats['periodic_candidates']}",
-                    f"РЈСЃРїРµС€РЅРѕ РѕС‚РїСЂР°РІР»РµРЅРѕ: {stats['sent']}",
-                    f"РћС€РёР±РѕРє РѕС‚РїСЂР°РІРєРё: {stats['failed']}",
+                    f"Строк обработано: {stats['rows_total']}",
+                    f"Кандидаты (запись на завтра): {stats['appointment_candidates']}",
+                    f"Кандидаты (хирург на завтра): {stats['surgeon_candidates']}",
+                    f"Кандидаты (периодические): {stats['periodic_candidates']}",
+                    f"Успешно отправлено: {stats['sent']}",
+                    f"Ошибок отправки: {stats['failed']}",
                 ]
             )
         )

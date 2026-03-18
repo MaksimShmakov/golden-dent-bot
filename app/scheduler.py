@@ -116,7 +116,7 @@ async def send_daily_messages(
                 zone=zone,
                 store=store,
                 kind="appointment",
-                text_prefix="Р—РґСЂР°РІСЃС‚РІСѓР№С‚Рµ! Р’С‹ Р·Р°РїРёСЃР°РЅС‹ РЅР° Р·Р°РІС‚СЂР°",
+                text_prefix="Здравствуйте! Вы записаны на завтра",
                 status_column=entry.status_column,
             )
             _apply_delivery_stats(stats, entry.username, sent, failure_reason)
@@ -140,8 +140,8 @@ async def send_daily_messages(
                 store=store,
                 kind="surgeon_appointment",
                 text_prefix=(
-                    "Р—РґСЂР°РІСЃС‚РІСѓР№С‚Рµ! Р’С‹ Р·Р°РїРёСЃР°РЅС‹ "
-                    "РЅР° РїР»Р°РЅРѕРІС‹Р№ РІРёР·РёС‚ С…РёСЂСѓСЂРіР° Р·Р°РІС‚СЂР°"
+                    "Здравствуйте! Вы записаны "
+                    "на плановый визит хирурга завтра"
                 ),
                 status_column=entry.status_column,
             )
@@ -269,23 +269,23 @@ async def _send_appointment_message(
     time_str = local_dt.strftime("%H:%M")
     text = (
         f"{text_prefix} "
-        f"{date_str} Рі РІ РєР»РёРЅРёРєСѓ В«Р“РѕР»РґРµРЅ Р”РµРЅС‚В» РЅР° РїСЂРёРµРј РІ {time_str} рџ•Ґ"
+        f"{date_str} г в клинику «Голден Дент» на прием в {time_str} 🕥"
     )
     keyboard = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "РџРѕРґС‚РІРµСЂРґРёС‚СЊ Р·Р°РїРёСЃСЊ",
+                    "Подтвердить запись",
                     callback_data=f"confirm_appt:{row_number}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "РћС‚РјРµРЅРёС‚СЊ Р·Р°РїРёСЃСЊ",
+                    "Отменить запись",
                     callback_data=f"cancel_appt:{row_number}",
                 )
             ],
-            [InlineKeyboardButton("РџРµСЂРµРЅРµСЃС‚Рё Р·Р°РїРёСЃСЊ", url=_build_reschedule_url(local_dt))],
+            [InlineKeyboardButton("Перенести запись", url=_build_reschedule_url(local_dt))],
         ]
     )
     target, failure_reason = _resolve_private_target(store, username)
@@ -306,7 +306,7 @@ async def _send_appointment_message(
         sheets.update_appointment_status(
             appointments_tab,
             row_number,
-            "РѕС‚РїСЂР°РІР»РµРЅРѕ",
+            "отправлено",
             status_column,
         )
         return True, None
@@ -354,7 +354,7 @@ async def _send_periodic_message(
         sheets.update_appointment_status(
             appointments_tab,
             row_number,
-            "РѕС‚РїСЂР°РІР»РµРЅРѕ",
+            "отправлено",
             status_column,
         )
         store.set_reminder_context(
@@ -434,7 +434,7 @@ def _parse_birth_date(value: str) -> date | None:
 
 def _build_reschedule_url(dt: datetime) -> str:
     date_time_str = dt.strftime("%d.%m.%Y %H:%M")
-    text = f"Р—РґСЂР°РІСЃС‚РІСѓР№С‚Рµ! РҐРѕС‡Сѓ РїРµСЂРµРЅРµСЃС‚Рё РјРѕСЋ Р·Р°РїРёСЃСЊ {date_time_str}"
+    text = f"Здравствуйте! Хочу перенести мою запись {date_time_str}"
     return f"https://t.me/{_ADMIN_USERNAME}?text={quote(text)}"
 
 
