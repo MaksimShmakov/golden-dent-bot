@@ -24,6 +24,8 @@ class ClientProfile:
     username: str
     full_name: str
     phone: str
+    birth_date: str
+    consent_given_at: str
     updated_at: str
 
 
@@ -90,6 +92,8 @@ class SQLiteStateStore:
                     username TEXT NOT NULL DEFAULT '',
                     full_name TEXT NOT NULL DEFAULT '',
                     phone TEXT NOT NULL DEFAULT '',
+                    birth_date TEXT NOT NULL DEFAULT '',
+                    consent_given_at TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -121,6 +125,17 @@ class SQLiteStateStore:
                     appointment_row INTEGER NOT NULL,
                     status_column TEXT NOT NULL DEFAULT 'C',
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS birthday_message_log (
+                    user_id INTEGER NOT NULL,
+                    sent_on TEXT NOT NULL,
+                    bonus_amount INTEGER NOT NULL DEFAULT 0,
+                    sent_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, sent_on)
                 )
                 """
             )
@@ -174,6 +189,12 @@ class SQLiteStateStore:
             conn.execute("ALTER TABLE client_map ADD COLUMN full_name TEXT NOT NULL DEFAULT ''")
         if "phone" not in columns:
             conn.execute("ALTER TABLE client_map ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
+        if "birth_date" not in columns:
+            conn.execute("ALTER TABLE client_map ADD COLUMN birth_date TEXT NOT NULL DEFAULT ''")
+        if "consent_given_at" not in columns:
+            conn.execute(
+                "ALTER TABLE client_map ADD COLUMN consent_given_at TEXT NOT NULL DEFAULT ''"
+            )
 
     def _migrate_reminder_context_schema(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(reminder_context)").fetchall()}
@@ -209,8 +230,16 @@ class SQLiteStateStore:
         for chat_id, username, updated_at in cur.fetchall():
             conn.execute(
                 """
-                INSERT INTO client_map (user_id, username, full_name, phone, updated_at)
-                VALUES (?, ?, '', '', ?)
+                INSERT INTO client_map (
+                    user_id,
+                    username,
+                    full_name,
+                    phone,
+                    birth_date,
+                    consent_given_at,
+                    updated_at
+                )
+                VALUES (?, ?, '', '', '', '', ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     username=excluded.username,
                     updated_at=excluded.updated_at
@@ -328,13 +357,21 @@ class SQLiteStateStore:
         full_name: str | None,
         phone: str | None,
         updated_at: datetime,
+        birth_date: str | None = None,
+        consent_given_at: str | None = None,
     ) -> bool:
         normalized_username = _normalize_username(username)
         normalized_full_name = _normalize_full_name(full_name)
         normalized_phone = _normalize_phone(phone)
+        normalized_birth_date = _normalize_birth_date(birth_date)
+        normalized_consent = _normalize_datetime_text(consent_given_at)
         with self._connect() as conn:
             cur = conn.execute(
-                "SELECT username, full_name, phone FROM client_map WHERE user_id=?",
+                """
+                SELECT username, full_name, phone, birth_date, consent_given_at
+                FROM client_map
+                WHERE user_id=?
+                """,
                 (user_id,),
             )
             row = cur.fetchone()
@@ -342,15 +379,27 @@ class SQLiteStateStore:
                 normalized_username,
                 normalized_full_name,
                 normalized_phone,
+                normalized_birth_date,
+                normalized_consent,
             )
             conn.execute(
                 """
-                INSERT INTO client_map (user_id, username, full_name, phone, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO client_map (
+                    user_id,
+                    username,
+                    full_name,
+                    phone,
+                    birth_date,
+                    consent_given_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     username=excluded.username,
                     full_name=excluded.full_name,
                     phone=excluded.phone,
+                    birth_date=excluded.birth_date,
+                    consent_given_at=excluded.consent_given_at,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -358,6 +407,8 @@ class SQLiteStateStore:
                     normalized_username,
                     normalized_full_name,
                     normalized_phone,
+                    normalized_birth_date,
+                    normalized_consent,
                     updated_at.isoformat(),
                 ),
             )
@@ -383,6 +434,57 @@ class SQLiteStateStore:
             conn.commit()
         return changed
 
+    def update_client_birth_date(
+        self,
+        user_id: int,
+        birth_date: str | None,
+        updated_at: datetime,
+    ) -> bool:
+        normalized_birth_date = _normalize_birth_date(birth_date)
+        with self._connect() as conn:
+            cur = conn.execute("SELECT birth_date FROM client_map WHERE user_id=?", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                return False
+            changed = row[0] != normalized_birth_date
+            conn.execute(
+                """
+                UPDATE client_map
+                SET birth_date=?, updated_at=?
+                WHERE user_id=?
+                """,
+                (normalized_birth_date, updated_at.isoformat(), user_id),
+            )
+            conn.commit()
+        return changed
+
+    def update_client_consent(
+        self,
+        user_id: int,
+        consent_given_at: str | None,
+        updated_at: datetime,
+    ) -> bool:
+        normalized_consent = _normalize_datetime_text(consent_given_at)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT consent_given_at FROM client_map WHERE user_id=?",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            changed = row[0] != normalized_consent
+            conn.execute(
+                """
+                UPDATE client_map
+                SET consent_given_at=?, updated_at=?
+                WHERE user_id=?
+                """,
+                (normalized_consent, updated_at.isoformat(), user_id),
+            )
+            conn.commit()
+        return changed
+
     def remove_client(self, user_id: int) -> bool:
         with self._connect() as conn:
             cur = conn.execute("DELETE FROM client_map WHERE user_id=?", (user_id,))
@@ -401,7 +503,7 @@ class SQLiteStateStore:
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                SELECT user_id, username, full_name, phone, updated_at
+                SELECT user_id, username, full_name, phone, birth_date, consent_given_at, updated_at
                 FROM client_map
                 ORDER BY
                     CASE WHEN username = '' THEN 1 ELSE 0 END,
@@ -416,7 +518,9 @@ class SQLiteStateStore:
                 username=row[1],
                 full_name=row[2],
                 phone=row[3],
-                updated_at=row[4],
+                birth_date=row[4],
+                consent_given_at=row[5],
+                updated_at=row[6],
             )
             for row in rows
         ]
@@ -425,7 +529,7 @@ class SQLiteStateStore:
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                SELECT user_id, username, full_name, phone, updated_at
+                SELECT user_id, username, full_name, phone, birth_date, consent_given_at, updated_at
                 FROM client_map
                 WHERE user_id=?
                 """,
@@ -439,7 +543,9 @@ class SQLiteStateStore:
             username=row[1],
             full_name=row[2],
             phone=row[3],
-            updated_at=row[4],
+            birth_date=row[4],
+            consent_given_at=row[5],
+            updated_at=row[6],
         )
 
     def mark_activated(self, user_id: int, activated_at: datetime) -> bool:
@@ -863,6 +969,48 @@ class SQLiteStateStore:
             )
             conn.commit()
 
+    def mark_birthday_message_sent(
+        self,
+        user_id: int,
+        sent_on: str,
+        bonus_amount: int,
+        sent_at: datetime,
+    ) -> bool:
+        normalized_sent_on = sent_on.strip()
+        if not normalized_sent_on:
+            return False
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO birthday_message_log (
+                    user_id,
+                    sent_on,
+                    bonus_amount,
+                    sent_at
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (user_id, normalized_sent_on, bonus_amount, sent_at.isoformat()),
+            )
+            conn.commit()
+        return cur.rowcount > 0
+
+    def has_birthday_message_for_day(self, user_id: int, sent_on: str) -> bool:
+        normalized_sent_on = sent_on.strip()
+        if not normalized_sent_on:
+            return False
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT 1
+                FROM birthday_message_log
+                WHERE user_id=? AND sent_on=?
+                """,
+                (user_id, normalized_sent_on),
+            )
+            row = cur.fetchone()
+        return row is not None
+
 
 def _normalize_username(username: str | None) -> str:
     if not username:
@@ -885,6 +1033,18 @@ def _normalize_phone(phone: str | None) -> str:
     if not phone:
         return ""
     return phone.strip()
+
+
+def _normalize_birth_date(birth_date: str | None) -> str:
+    if not birth_date:
+        return ""
+    return birth_date.strip()
+
+
+def _normalize_datetime_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return value.strip()
 
 
 def _normalize_status_column(status_column: str | None) -> str:

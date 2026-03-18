@@ -8,6 +8,7 @@ from app.config import Settings
 from app.scheduler import (
     build_scheduler,
     flush_undelivered_events,
+    schedule_birthday_messages,
     schedule_daily_messages,
 )
 from app.sheets import SheetsClient
@@ -77,6 +78,17 @@ async def lifespan(app: FastAPI):
         config.daily_reminder_hour,
         config.daily_reminder_minute,
         app.state.store,
+    )
+    schedule_birthday_messages(
+        app.state.scheduler,
+        application.bot,
+        app.state.sheets,
+        config.google_undelivered_tab,
+        config.tz,
+        config.daily_reminder_hour,
+        config.daily_reminder_minute,
+        app.state.store,
+        config.birthday_bonus_amount,
     )
     flush_undelivered_events(
         app.state.sheets,

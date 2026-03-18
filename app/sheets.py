@@ -45,6 +45,8 @@ class SheetsClient:
                 username=username,
                 full_name="",
                 phone="",
+                birth_date="",
+                consent_given_at="",
                 updated_at="",
             )
             for index, username in enumerate(unique_usernames, start=1)
@@ -54,15 +56,24 @@ class SheetsClient:
     def sync_clients(self, tab_name: str, clients: list[ClientProfile]) -> None:
         ws = self._sheet.worksheet(tab_name)
         existing_rows = ws.get_all_values()
-        default_header = ["tg_username", "fio", "phone", "tg_user_id"]
+        default_header = [
+            "tg_username",
+            "fio",
+            "phone",
+            "tg_user_id",
+            "birth_date",
+            "consent_given_at",
+        ]
 
         if existing_rows:
-            existing_header = (existing_rows[0] + ["", "", "", ""])[:4]
+            existing_header = (existing_rows[0] + ["", "", "", "", "", ""])[:6]
             header = [
                 existing_header[0].strip() or default_header[0],
                 existing_header[1].strip() or default_header[1],
                 existing_header[2].strip() or default_header[2],
                 existing_header[3].strip() or default_header[3],
+                existing_header[4].strip() or default_header[4],
+                existing_header[5].strip() or default_header[5],
             ]
         else:
             header = default_header
@@ -83,22 +94,24 @@ class SheetsClient:
                     client.full_name,
                     client.phone,
                     str(client.user_id) if client.user_id else "",
+                    _format_birth_date_for_sheet(client.birth_date),
+                    _format_datetime_for_sheet(client.consent_given_at),
                 ]
             )
 
         existing_projection = [
-            (row + ["", "", "", ""])[:4] for row in existing_rows
+            (row + ["", "", "", "", "", ""])[:6] for row in existing_rows
         ]
         if existing_projection == target_rows:
             return
 
         ws.update(
-            f"A1:D{len(target_rows)}",
+            f"A1:F{len(target_rows)}",
             target_rows,
             value_input_option="USER_ENTERED",
         )
         if len(existing_projection) > len(target_rows):
-            ws.batch_clear([f"A{len(target_rows) + 1}:D{len(existing_projection)}"])
+            ws.batch_clear([f"A{len(target_rows) + 1}:F{len(existing_projection)}"])
 
     def update_appointment_status(
         self,
@@ -156,14 +169,16 @@ def _iter_sheet_entries(rows: list[list[str]]) -> Iterable[SheetEntry]:
             status_column="G",
         )
         if not periodic_3m and appointment_entry:
-            periodic_3m = _build_periodic_entry_from_base(
-                row_number=row_number,
-                dt=appointment_entry.dt,
-                username=appointment_entry.username,
-                status=_cell_value(row, 6),
-                reminder_months=3,
-                status_column="G",
-            )
+            legacy_months = _parse_legacy_reminder_months(row)
+            if legacy_months and legacy_months != 6:
+                periodic_3m = _build_periodic_entry_from_base(
+                    row_number=row_number,
+                    dt=appointment_entry.dt,
+                    username=appointment_entry.username,
+                    status=_cell_value(row, 6),
+                    reminder_months=legacy_months,
+                    status_column="G",
+                )
         if periodic_3m:
             yield periodic_3m
 
@@ -218,7 +233,7 @@ def _build_appointment_entry(row_number: int, row: list[str]) -> SheetEntry | No
         status=_cell_value(row, 2),
         cancel_reason=_cell_value(row, 3),
         reminder_months=0,
-        surgeon_dt=None,
+        surgeon_dt=_parse_legacy_surgeon_datetime(row),
         status_column="C",
         entry_kind="appointment",
     )
@@ -323,3 +338,38 @@ def _parse_reminder_months(value: str) -> int:
     if months <= 0 or months > 120:
         return 6
     return months
+
+
+def _parse_legacy_reminder_months(row: list[str]) -> int | None:
+    months_raw = _cell_value(row, 4)
+    periodic_dt = _parse_datetime(months_raw) if months_raw else None
+    maybe_surgeon_dt = _parse_datetime(_cell_value(row, 5))
+    if periodic_dt and not maybe_surgeon_dt:
+        return None
+    months = _parse_reminder_months(months_raw)
+    return months if months > 0 else None
+
+
+def _parse_legacy_surgeon_datetime(row: list[str]) -> datetime | None:
+    value = _cell_value(row, 5)
+    if not value:
+        return None
+    periodic_dt = _parse_datetime(_cell_value(row, 4)) if _cell_value(row, 4) else None
+    maybe_surgeon_dt = _parse_datetime(value)
+    if periodic_dt and not maybe_surgeon_dt:
+        return None
+    return maybe_surgeon_dt
+
+
+def _format_birth_date_for_sheet(value: str) -> str:
+    return value.strip()
+
+
+def _format_datetime_for_sheet(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value.strip()
+    return parsed.strftime("%d.%m.%Y %H:%M")

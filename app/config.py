@@ -21,5 +21,8 @@ class Settings(BaseSettings):
     tz: str = "Asia/Novosibirsk"
     daily_reminder_hour: int = 9
     daily_reminder_minute: int = 0
+    consent_policy_url: str | None = None
+    consent_rules_url: str | None = None
+    birthday_bonus_amount: int = 3000
 
     data_dir: str = "/data"

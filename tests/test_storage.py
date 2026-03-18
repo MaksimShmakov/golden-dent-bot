@@ -29,16 +29,29 @@ def test_activation_is_marked_once(tmp_path):
     assert store.mark_activated(42, now) is False
 
 
-def test_client_profile_contains_full_name_and_phone(tmp_path):
+def test_client_profile_contains_full_name_phone_birth_date_and_consent(tmp_path):
     store = SQLiteStateStore(str(tmp_path))
     now = datetime(2026, 2, 11, 10, 0, 0)
 
-    assert store.upsert_client(42, "User42", "Петров Петр", "+79000000000", now) is True
+    assert (
+        store.upsert_client(
+            42,
+            "User42",
+            "Петров Петр",
+            "+79000000000",
+            now,
+            birth_date="17.03.1990",
+            consent_given_at=now.isoformat(),
+        )
+        is True
+    )
     profile = store.get_client(42)
     assert profile is not None
     assert profile.username == "@user42"
     assert profile.full_name == "Петров Петр"
     assert profile.phone == "+79000000000"
+    assert profile.birth_date == "17.03.1990"
+    assert profile.consent_given_at == now.isoformat()
 
 
 def test_reminder_context_and_undelivered_events(tmp_path):
@@ -69,7 +82,15 @@ def test_reset_user_state_clears_user_related_data(tmp_path):
     now = datetime(2026, 2, 11, 10, 0, 0)
 
     store.upsert_user("User42", 42, now)
-    store.upsert_client(42, "User42", "Петров Петр", "+79000000000", now)
+    store.upsert_client(
+        42,
+        "User42",
+        "Петров Петр",
+        "+79000000000",
+        now,
+        birth_date="17.03.1990",
+        consent_given_at=now.isoformat(),
+    )
     store.set_pending(
         user_id=42,
         username="@user42",
@@ -93,6 +114,15 @@ def test_reset_user_state_clears_user_related_data(tmp_path):
     assert store.get_reminder_context(42) is None
     assert list(store.list_pending()) == []
     assert store.mark_activated(42, now) is True
+
+
+def test_birthday_message_log_is_idempotent(tmp_path):
+    store = SQLiteStateStore(str(tmp_path))
+    now = datetime(2026, 3, 17, 9, 0, 0)
+
+    assert store.mark_birthday_message_sent(42, "2026-03-17", 3000, now) is True
+    assert store.mark_birthday_message_sent(42, "2026-03-17", 3000, now) is False
+    assert store.has_birthday_message_for_day(42, "2026-03-17") is True
 
 
 def test_special_offers_templates_can_be_seeded_and_updated(tmp_path):

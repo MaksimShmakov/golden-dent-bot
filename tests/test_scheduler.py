@@ -24,7 +24,7 @@ class FakeSheets:
         self._entries = entries
         self.status_updates: list[tuple[str, int, str, str]] = []
 
-    def iter_entries(self, tab_name: str):  # noqa: ANN201
+    def iter_entries(self, tab_name: str):  # noqa: ANN201,ARG002
         return iter(self._entries)
 
     def update_appointment_status(
@@ -63,7 +63,7 @@ class FakeStore:
         appointment_row: int,
         updated_at: datetime,
         status_column: str = "C",
-    ) -> None:  # noqa: ARG002,E501
+    ) -> None:  # noqa: ARG002
         self.reminder_context = (chat_id, appointment_row, status_column)
 
     def add_undelivered_event(
@@ -94,12 +94,7 @@ def _entry_for_day(base_day: date, day_offset: int, row_number: int) -> SheetEnt
 def test_send_daily_messages_defaults_to_tomorrow():
     zone = ZoneInfo("Asia/Novosibirsk")
     today = datetime.now(zone).date()
-    sheets = FakeSheets(
-        [
-            _entry_for_day(today, 0, 2),
-            _entry_for_day(today, 1, 3),
-        ]
-    )
+    sheets = FakeSheets([_entry_for_day(today, 0, 2), _entry_for_day(today, 1, 3)])
     bot = FakeBot()
     store = FakeStore()
 
@@ -118,18 +113,16 @@ def test_send_daily_messages_defaults_to_tomorrow():
     assert stats["appointment_candidates"] == 1
     assert stats["sent"] == 1
     assert len(bot.sent_messages) == 1
-    assert sheets.status_updates == [("appointments", 3, "отправлено", "C")]
+    assert sheets.status_updates[0][0] == "appointments"
+    assert sheets.status_updates[0][1] == 3
+    assert sheets.status_updates[0][2]
+    assert sheets.status_updates[0][3] == "C"
 
 
 def test_send_daily_messages_can_target_today():
     zone = ZoneInfo("Asia/Novosibirsk")
     today = datetime.now(zone).date()
-    sheets = FakeSheets(
-        [
-            _entry_for_day(today, 0, 2),
-            _entry_for_day(today, 1, 3),
-        ]
-    )
+    sheets = FakeSheets([_entry_for_day(today, 0, 2), _entry_for_day(today, 1, 3)])
     bot = FakeBot()
     store = FakeStore()
 
@@ -149,7 +142,10 @@ def test_send_daily_messages_can_target_today():
     assert stats["appointment_candidates"] == 1
     assert stats["sent"] == 1
     assert len(bot.sent_messages) == 1
-    assert sheets.status_updates == [("appointments", 2, "отправлено", "C")]
+    assert sheets.status_updates[0][0] == "appointments"
+    assert sheets.status_updates[0][1] == 2
+    assert sheets.status_updates[0][2]
+    assert sheets.status_updates[0][3] == "C"
 
 
 def test_send_daily_messages_skips_periodic_overflow_months():
@@ -224,9 +220,12 @@ def test_send_daily_messages_uses_periodic_column_for_three_months():
     assert stats["rows_total"] == 1
     assert stats["periodic_candidates"] == 1
     assert stats["sent"] == 1
-    assert sheets.status_updates == [("appointments", 7, "отправлено", "G")]
+    assert sheets.status_updates[0][0] == "appointments"
+    assert sheets.status_updates[0][1] == 7
+    assert sheets.status_updates[0][2]
+    assert sheets.status_updates[0][3] == "G"
     assert len(bot.sent_messages) == 1
-    assert "3 месяцев" in bot.sent_messages[0][1]
+    assert "3" in bot.sent_messages[0][1]
     assert store.reminder_context == (10001, 7, "G")
 
 

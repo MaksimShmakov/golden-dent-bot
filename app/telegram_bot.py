@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -27,6 +27,8 @@ from telegram.ext import (
 from app.messages import (
     ADULT_SUBSCRIPTION_TEXT,
     CHILD_SUBSCRIPTION_TEXT,
+    CONSENT_POLICY_TEXT,
+    CONSENT_RULES_TEXT,
     FLASH_WHITENING_TEXT,
     IMPLANT_CROWN_TEXT,
     INFO_START_MESSAGE,
@@ -39,12 +41,13 @@ from app.messages import (
     build_special_offers_keyboard,
     build_ultrasound_contact_keyboard,
     send_about_message,
+    send_consent_message,
     send_info_start_message,
     send_main_message,
     send_special_offers_message,
     send_start_message,
 )
-from app.scheduler import send_daily_messages
+from app.scheduler import send_birthday_messages, send_daily_messages
 from app.sheets import SheetsClient
 from app.storage import OfferTemplate, SQLiteStateStore
 
@@ -57,6 +60,8 @@ _CANCEL_REASON_LABELS = {
     "other": "Другое",
 }
 _PENDING_ACTION_COLLECT_FULL_NAME = "collect_full_name"
+_PENDING_ACTION_COLLECT_PHONE = "collect_phone"
+_PENDING_ACTION_COLLECT_BIRTH_DATE = "collect_birth_date"
 _BROADCAST_STATE_KEY = "broadcast_state"
 _BROADCAST_DRAFT_KEY = "broadcast_draft"
 _OFFERS_ADMIN_STATE_KEY = "offers_admin_state"
@@ -90,6 +95,7 @@ def build_application(
     application.add_handler(CommandHandler("test_main", test_main_cmd))
     application.add_handler(CommandHandler("test_daily", test_daily_cmd))
     application.add_handler(CommandHandler("test_daily_debug", test_daily_debug_cmd))
+    application.add_handler(CommandHandler("test_birthday", test_birthday_cmd))
     application.add_handler(CommandHandler("test_reset", test_reset_cmd))
     application.add_handler(CommandHandler("broadcast", broadcast_cmd))
     application.add_handler(CommandHandler("broadcast_cancel", broadcast_cancel_cmd))
@@ -112,6 +118,10 @@ def build_application(
             cancel_reason_cb,
             pattern=r"^cancel_reason:\d+:(plans|irrelevant|sick|other)$",
         )
+    )
+    application.add_handler(CallbackQueryHandler(consent_accept_cb, pattern="^consent_accept$"))
+    application.add_handler(
+        CallbackQueryHandler(consent_doc_cb, pattern=r"^consent_doc:(policy|rules)$")
     )
     application.add_handler(CallbackQueryHandler(go_start_cb, pattern="^go_start$"))
     application.add_handler(CallbackQueryHandler(about_us_cb, pattern="^about_us$"))
@@ -146,27 +156,11 @@ def build_application(
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.effective_user:
         return
-    _record_user(update, context)
-    await _send_info_start_menu(context.bot, update.effective_chat.id, context)
-    full_name_requested = await _request_full_name_if_needed(update, context)
-    if not full_name_requested:
-        await _request_contact_if_needed(update, context)
-
-    tz = ZoneInfo(context.application.bot_data["tz"])
-    now = datetime.now(tz)
-    store: SQLiteStateStore = context.application.bot_data["store"]
-    if not store.mark_activated(update.effective_user.id, now):
+    if await _request_consent_if_needed(update, context):
         return
-
-    scheduler = context.application.bot_data["scheduler"]
-    scheduler.add_job(
-        send_start_message,
-        trigger="date",
-        run_date=now + timedelta(days=3),
-        id=f"start_followup_{update.effective_user.id}",
-        replace_existing=True,
-        args=[context.bot, update.effective_chat.id],
-    )
+    _record_user(update, context)
+    await _ensure_activated(update.effective_user.id, update.effective_chat.id, context)
+    await _continue_onboarding(update, context)
 
 
 async def test_main_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1928,3 +1922,576 @@ def _set_appointment_cancel_reason(
     sheets: SheetsClient = context.application.bot_data["sheets"]
     tab = context.application.bot_data["config"].google_appointments_tab
     sheets.update_appointment_cancel_reason(tab, row_number, reason)
+
+
+async def test_daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _record_user(update, context)
+    sheets: SheetsClient = context.application.bot_data["sheets"]
+    tz = context.application.bot_data["tz"]
+    tab = context.application.bot_data["config"].google_appointments_tab
+    undelivered_tab = context.application.bot_data["config"].google_undelivered_tab
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    zone = ZoneInfo(tz)
+    days_ahead = _parse_test_daily_days_ahead(context.args)
+    target_date = (datetime.now(zone).date() + timedelta(days=days_ahead)).strftime("%d.%m.%Y")
+
+    try:
+        stats = await send_daily_messages(
+            context.bot,
+            sheets,
+            tab,
+            undelivered_tab,
+            tz,
+            store,
+            appointment_days_ahead=days_ahead,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("test_daily failed")
+        if update.effective_chat:
+            await update.effective_chat.send_message(
+                f"Ошибка /test_daily: {type(exc).__name__}: {exc}"
+            )
+        return
+
+    if not update.effective_chat:
+        return
+
+    lines = [
+        "Тест ежедневной рассылки завершён.",
+        f"Целевая дата: {target_date} (смещение: {days_ahead})",
+        f"Строк обработано: {stats['rows_total']}",
+        f"Кандидаты по записи на завтра: {stats['appointment_candidates']}",
+        f"Кандидаты по хирургу на завтра: {stats['surgeon_candidates']}",
+        f"Кандидаты по периодическим: {stats['periodic_candidates']}",
+        f"Успешно отправлено: {stats['sent']}",
+        f"Ошибок: {stats['failed']}",
+    ]
+    failed_examples = stats.get("failed_examples", [])
+    if isinstance(failed_examples, list) and failed_examples:
+        lines.append("Первые ошибки:")
+        lines.extend(str(item) for item in failed_examples)
+    await update.effective_chat.send_message("\n".join(lines))
+
+
+async def test_birthday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat:
+        return
+    _record_user(update, context)
+    sheets: SheetsClient = context.application.bot_data["sheets"]
+    tz = context.application.bot_data["tz"]
+    undelivered_tab = context.application.bot_data["config"].google_undelivered_tab
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    bonus_amount = context.application.bot_data["config"].birthday_bonus_amount
+    zone = ZoneInfo(tz)
+    target_date = _parse_test_birthday_date(context.args, zone)
+
+    try:
+        stats = await send_birthday_messages(
+            context.bot,
+            sheets,
+            undelivered_tab,
+            tz,
+            store,
+            bonus_amount,
+            target_date=target_date,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("test_birthday failed")
+        await update.effective_chat.send_message(
+            f"Ошибка /test_birthday: {type(exc).__name__}: {exc}"
+        )
+        return
+
+    lines = [
+        "Тест поздравлений с днём рождения завершён.",
+        f"Целевая дата: {target_date.strftime('%d.%m.%Y')}",
+        f"Кандидаты: {stats['candidates']}",
+        f"Уже отправляли сегодня: {stats['already_sent']}",
+        f"Успешно отправлено: {stats['sent']}",
+        f"Ошибок: {stats['failed']}",
+    ]
+    failed_examples = stats.get("failed_examples", [])
+    if isinstance(failed_examples, list) and failed_examples:
+        lines.append("Первые ошибки:")
+        lines.extend(str(item) for item in failed_examples)
+    await update.effective_chat.send_message("\n".join(lines))
+
+
+async def consent_accept_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message or not query.from_user:
+        return
+
+    await query.answer()
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    now = datetime.now(tz)
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    profile = store.get_client(query.from_user.id)
+    changed = _upsert_client_profile(
+        context,
+        user_id=query.from_user.id,
+        username=query.from_user.username,
+        full_name=profile.full_name if profile else "",
+        phone=profile.phone if profile else "",
+        birth_date=profile.birth_date if profile else "",
+        consent_given_at=now.isoformat(),
+        updated_at=now,
+    )
+    if query.from_user.username:
+        store.upsert_user(query.from_user.username, query.from_user.id, now)
+    if changed:
+        _sync_clients_sheet(context)
+
+    await query.message.reply_text("Согласие сохранено.")
+    await _ensure_activated(query.from_user.id, query.message.chat.id, context)
+    await _continue_onboarding(update, context)
+
+
+async def consent_doc_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    await query.answer()
+    doc_key = (query.data or "").split(":", maxsplit=1)[1]
+    if doc_key == "policy":
+        await query.message.reply_text(CONSENT_POLICY_TEXT)
+        return
+    await query.message.reply_text(CONSENT_RULES_TEXT)
+
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+
+    _record_user(update, context)
+    contact = update.message.contact
+    if not contact:
+        return
+
+    if contact.user_id and contact.user_id != update.effective_user.id:
+        await update.message.reply_text(
+            "Пожалуйста, отправьте свой номер через кнопку ниже.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    now = datetime.now(tz)
+    user = update.effective_user
+    existing = store.get_client(user.id)
+    phone = _parse_phone_value(contact.phone_number)
+    if not phone:
+        await update.message.reply_text(
+            "Не удалось распознать номер. Попробуйте ещё раз кнопкой ниже или введите вручную.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await _request_phone_if_needed(update, context)
+        return
+
+    changed = _upsert_client_profile(
+        context,
+        user_id=user.id,
+        username=user.username,
+        full_name=existing.full_name if existing else "",
+        phone=phone,
+        birth_date=existing.birth_date if existing else "",
+        consent_given_at=existing.consent_given_at if existing else "",
+        updated_at=now,
+    )
+    if changed:
+        _sync_clients_sheet(context)
+
+    await update.message.reply_text(
+        "Спасибо! Номер сохранён.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    if await _request_birth_date_if_needed(update, context):
+        return
+    await _complete_onboarding(update, context)
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+
+    _record_user(update, context)
+    text = update.message.text.strip()
+
+    if await _handle_offers_admin_text(update, context, text):
+        return
+
+    if await _handle_broadcast_text(update, context, text):
+        return
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    pending = store.pop_pending(update.effective_user.id)
+    if pending:
+        tz = ZoneInfo(context.application.bot_data["tz"])
+        now = datetime.now(tz)
+
+        if pending.action_type == _PENDING_ACTION_COLLECT_FULL_NAME:
+            full_name = _parse_full_name_segments(text)
+            if not full_name:
+                store.set_pending(
+                    user_id=update.effective_user.id,
+                    username=pending.username,
+                    created_at=now,
+                    action_type=_PENDING_ACTION_COLLECT_FULL_NAME,
+                )
+                await update.message.reply_text(
+                    "Пожалуйста, напишите ФИО в формате: Фамилия Имя Отчество."
+                )
+                return
+
+            profile = store.get_client(update.effective_user.id)
+            changed = _upsert_client_profile(
+                context,
+                user_id=update.effective_user.id,
+                username=update.effective_user.username,
+                full_name=full_name,
+                phone=profile.phone if profile else "",
+                birth_date=profile.birth_date if profile else "",
+                consent_given_at=profile.consent_given_at if profile else "",
+                updated_at=now,
+            )
+            if changed:
+                _sync_clients_sheet(context)
+            await update.message.reply_text("Спасибо! ФИО сохранили.")
+            if await _request_phone_if_needed(update, context):
+                return
+            if await _request_birth_date_if_needed(update, context):
+                return
+            await _complete_onboarding(update, context)
+            return
+
+        if pending.action_type == _PENDING_ACTION_COLLECT_PHONE:
+            phone = _parse_phone_value(text)
+            if not phone:
+                store.set_pending(
+                    user_id=update.effective_user.id,
+                    username=pending.username,
+                    created_at=now,
+                    action_type=_PENDING_ACTION_COLLECT_PHONE,
+                )
+                await update.message.reply_text(
+                    "Не удалось распознать номер. Отправьте его кнопкой ниже или напишите в формате +79991234567."
+                )
+                return
+
+            profile = store.get_client(update.effective_user.id)
+            changed = _upsert_client_profile(
+                context,
+                user_id=update.effective_user.id,
+                username=update.effective_user.username,
+                full_name=profile.full_name if profile else "",
+                phone=phone,
+                birth_date=profile.birth_date if profile else "",
+                consent_given_at=profile.consent_given_at if profile else "",
+                updated_at=now,
+            )
+            if changed:
+                _sync_clients_sheet(context)
+            await update.message.reply_text("Спасибо! Номер сохранили.", reply_markup=ReplyKeyboardRemove())
+            if await _request_birth_date_if_needed(update, context):
+                return
+            await _complete_onboarding(update, context)
+            return
+
+        if pending.action_type == _PENDING_ACTION_COLLECT_BIRTH_DATE:
+            birth_date_value = _parse_birth_date_value(text, tz)
+            if not birth_date_value:
+                store.set_pending(
+                    user_id=update.effective_user.id,
+                    username=pending.username,
+                    created_at=now,
+                    action_type=_PENDING_ACTION_COLLECT_BIRTH_DATE,
+                )
+                await update.message.reply_text(
+                    "Введите дату рождения в формате ДД.ММ.ГГГГ, например 17.03.1990."
+                )
+                return
+
+            changed = store.update_client_birth_date(
+                update.effective_user.id,
+                birth_date_value,
+                now,
+            )
+            if changed:
+                _sync_clients_sheet(context)
+            await update.message.reply_text("Спасибо! Дату рождения сохранили.")
+            await _complete_onboarding(update, context)
+            return
+
+        sheets: SheetsClient = context.application.bot_data["sheets"]
+        now_str = now.strftime("%d.%m.%Y %H:%M")
+        profile = store.get_client(update.effective_user.id)
+        full_name = profile.full_name if profile else ""
+        phone = profile.phone if profile else ""
+
+        if pending.action_type == "cancel_other_reason":
+            if pending.appointment_row:
+                _set_appointment_cancel_reason(context, pending.appointment_row, text)
+                _set_appointment_status(
+                    context,
+                    pending.appointment_row,
+                    "отменил",
+                    status_column=pending.status_column,
+                )
+            sheets.append_comment(
+                context.application.bot_data["config"].google_comments_tab,
+                [now_str, pending.username, f"Отмена записи: {text}", full_name, phone],
+            )
+            await update.message.reply_text("Спасибо, причина отмены записана.")
+            return
+
+        sheets.append_comment(
+            context.application.bot_data["config"].google_comments_tab,
+            [now_str, pending.username, text, full_name, phone],
+        )
+        if pending.appointment_row:
+            _set_appointment_status(
+                context,
+                pending.appointment_row,
+                "не готов, комментарий",
+                status_column=pending.status_column,
+            )
+        await update.message.reply_text("Спасибо, комментарий записан!")
+        return
+
+
+def _record_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user:
+        return
+
+    user = update.effective_user
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    now = datetime.now(tz)
+
+    if user.username:
+        store.upsert_user(user.username, user.id, now)
+
+    existing = store.get_client(user.id)
+    changed = _upsert_client_profile(
+        context,
+        user_id=user.id,
+        username=user.username,
+        full_name=existing.full_name if existing else "",
+        phone=existing.phone if existing else "",
+        birth_date=existing.birth_date if existing else "",
+        consent_given_at=existing.consent_given_at if existing else "",
+        updated_at=now,
+    )
+    if changed:
+        _sync_clients_sheet(context)
+
+
+async def _request_consent_if_needed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not update.effective_user or not update.effective_chat:
+        return False
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    profile = store.get_client(update.effective_user.id)
+    if profile and profile.consent_given_at:
+        return False
+
+    config = context.application.bot_data["config"]
+    await send_consent_message(
+        context.bot,
+        update.effective_chat.id,
+        policy_url=config.consent_policy_url,
+        rules_url=config.consent_rules_url,
+    )
+    return True
+
+
+async def _continue_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _request_full_name_if_needed(update, context):
+        return
+    if await _request_phone_if_needed(update, context):
+        return
+    if await _request_birth_date_if_needed(update, context):
+        return
+    await _complete_onboarding(update, context)
+
+
+async def _complete_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat:
+        return
+    await _send_info_start_menu(context.bot, update.effective_chat.id, context)
+
+
+async def _ensure_activated(
+    user_id: int,
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    now = datetime.now(tz)
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    if not store.mark_activated(user_id, now):
+        return
+
+    scheduler = context.application.bot_data["scheduler"]
+    scheduler.add_job(
+        send_start_message,
+        trigger="date",
+        run_date=now + timedelta(days=3),
+        id=f"start_followup_{user_id}",
+        replace_existing=True,
+        args=[context.bot, chat_id],
+    )
+
+
+async def _request_phone_if_needed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not update.effective_user or not update.effective_chat:
+        return False
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    profile = store.get_client(update.effective_user.id)
+    if not profile or not profile.full_name:
+        return False
+    if profile.phone:
+        return False
+
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    user = update.effective_user
+    username = f"@{user.username}" if user.username else f"id:{user.id}"
+    store.set_pending(
+        user_id=user.id,
+        username=username,
+        created_at=datetime.now(tz),
+        action_type=_PENDING_ACTION_COLLECT_PHONE,
+    )
+    keyboard = ReplyKeyboardMarkup(
+        [[KeyboardButton("Поделиться номером", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await update.effective_chat.send_message(
+        "Отправьте номер телефона кнопкой ниже или напишите его вручную.",
+        reply_markup=keyboard,
+    )
+    return True
+
+
+async def _request_birth_date_if_needed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not update.effective_user or not update.effective_chat:
+        return False
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    profile = store.get_client(update.effective_user.id)
+    if not profile or not profile.full_name or not profile.phone:
+        return False
+    if profile.birth_date:
+        return False
+
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    user = update.effective_user
+    username = f"@{user.username}" if user.username else f"id:{user.id}"
+    store.set_pending(
+        user_id=user.id,
+        username=username,
+        created_at=datetime.now(tz),
+        action_type=_PENDING_ACTION_COLLECT_BIRTH_DATE,
+    )
+    await update.effective_chat.send_message(
+        "Укажите дату рождения в формате ДД.ММ.ГГГГ.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return True
+
+
+async def _request_full_name_if_needed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not update.effective_user or not update.effective_chat:
+        return False
+
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    profile = store.get_client(update.effective_user.id)
+    if profile and profile.full_name:
+        return False
+
+    tz = ZoneInfo(context.application.bot_data["tz"])
+    user = update.effective_user
+    username = f"@{user.username}" if user.username else f"id:{user.id}"
+    store.set_pending(
+        user_id=user.id,
+        username=username,
+        created_at=datetime.now(tz),
+        action_type=_PENDING_ACTION_COLLECT_FULL_NAME,
+    )
+    await update.effective_chat.send_message(
+        "Пожалуйста, напишите ФИО в формате: Фамилия Имя Отчество."
+    )
+    return True
+
+
+def _upsert_client_profile(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    username: str | None,
+    full_name: str | None,
+    phone: str | None,
+    birth_date: str | None,
+    consent_given_at: str | None,
+    updated_at: datetime,
+) -> bool:
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    return store.upsert_client(
+        user_id=user_id,
+        username=username,
+        full_name=full_name,
+        phone=phone,
+        birth_date=birth_date,
+        consent_given_at=consent_given_at,
+        updated_at=updated_at,
+    )
+
+
+def _parse_phone_value(value: str) -> str:
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if not digits:
+        return ""
+    if len(digits) == 10:
+        digits = f"7{digits}"
+    elif len(digits) == 11 and digits.startswith("8"):
+        digits = f"7{digits[1:]}"
+    if len(digits) != 11 or not digits.startswith("7"):
+        return ""
+    return f"+{digits}"
+
+
+def _parse_birth_date_value(value: str, tz: str | ZoneInfo) -> str:
+    try:
+        parsed = datetime.strptime(value.strip(), "%d.%m.%Y").date()
+    except ValueError:
+        return ""
+
+    zone = ZoneInfo(tz) if isinstance(tz, str) else tz
+    today = datetime.now(zone).date()
+    if parsed >= today:
+        return ""
+    if parsed.year < today.year - 120:
+        return ""
+    return parsed.strftime("%d.%m.%Y")
+
+
+def _parse_test_birthday_date(args: list[str], zone: ZoneInfo) -> date:
+    if not args:
+        return datetime.now(zone).date()
+
+    raw = args[0].strip().lower()
+    if raw in {"today", "сегодня"}:
+        return datetime.now(zone).date()
+
+    for fmt in ("%d.%m.%Y", "%d.%m"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        if fmt == "%d.%m":
+            return parsed.replace(year=datetime.now(zone).year).date()
+        return parsed.date()
+    return datetime.now(zone).date()

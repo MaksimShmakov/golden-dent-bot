@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 from urllib.parse import quote
@@ -24,6 +26,26 @@ START_MESSAGE = (
 INFO_START_MESSAGE = (
     "Здравствуйте!\n"
     "Клиника «Голден Дент», рады видеть вас в числе наших пациентов."
+)
+
+CONSENT_MESSAGE = (
+    "Добро пожаловать в чат-бот клиники.\n\n"
+    "Для продолжения нажмите «Продолжить».\n\n"
+    "Нажимая кнопку, вы даёте согласие на обработку ваших персональных данных "
+    "(ФИО, номер телефона, дата рождения) для:\n"
+    "• ведения базы пациентов\n"
+    "• связи с вами\n"
+    "• отправки сервисных сообщений, включая поздравления и бонусы в день рождения."
+)
+
+CONSENT_POLICY_TEXT = (
+    "Политика обработки персональных данных не настроена в боте. "
+    "Добавьте ссылку на опубликованный документ в настройках окружения."
+)
+
+CONSENT_RULES_TEXT = (
+    "Правила использования чат-бота не настроены в боте. "
+    "Добавьте ссылку на опубликованный документ в настройках окружения."
 )
 
 ABOUT_TEXT = (
@@ -156,6 +178,30 @@ CHILD_SUBSCRIPTION_CONTACT_URL = (
 )
 
 
+BIRTHDAY_CONTACT_TEXT = "Здравствуйте! Хочу использовать бонусы ко дню рождения."
+BIRTHDAY_USE_BONUSES_URL = f"https://t.me/{_ADMIN_USERNAME}?text={quote(BIRTHDAY_CONTACT_TEXT)}"
+
+
+def build_consent_keyboard(
+    policy_url: str | None = None,
+    rules_url: str | None = None,
+) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("✔ Продолжить", callback_data="consent_accept")]]
+    if policy_url:
+        rows.append([InlineKeyboardButton("Политика обработки персональных данных", url=policy_url)])
+    else:
+        rows.append(
+            [InlineKeyboardButton("Политика обработки персональных данных", callback_data="consent_doc:policy")]
+        )
+    if rules_url:
+        rows.append([InlineKeyboardButton("Правила использования чат-бота", url=rules_url)])
+    else:
+        rows.append(
+            [InlineKeyboardButton("Правила использования чат-бота", callback_data="consent_doc:rules")]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
 def build_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -217,6 +263,12 @@ def build_ultrasound_contact_keyboard() -> InlineKeyboardMarkup:
 
 def build_flash_contact_keyboard() -> InlineKeyboardMarkup:
     return _build_offer_actions_keyboard(FLASH_CONTACT_URL)
+
+
+def build_birthday_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🎁 Использовать бонусы", url=BIRTHDAY_USE_BONUSES_URL)]]
+    )
 
 
 async def send_main_message(bot, chat_id: int, reminder_months: int = 6) -> None:
@@ -301,3 +353,30 @@ async def send_about_message(bot, chat_id: int) -> None:
 
     logger.warning("About image file not found: %s", _ABOUT_PHOTO_PATH)
     await bot.send_message(chat_id=chat_id, text=ABOUT_TEXT)
+
+
+async def send_consent_message(
+    bot,
+    chat_id: int,
+    policy_url: str | None = None,
+    rules_url: str | None = None,
+) -> None:
+    await bot.send_message(
+        chat_id=chat_id,
+        text=CONSENT_MESSAGE,
+        reply_markup=build_consent_keyboard(policy_url=policy_url, rules_url=rules_url),
+    )
+
+
+async def send_birthday_message(bot, chat_id: int, bonus_amount: int) -> None:
+    await bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "Клиника «ГОЛДЕН ДЕНТ» поздравляет вас с днём рождения! 🌺\n"
+            "Желаем крепкого здоровья и как можно больше красивых улыбок.\n\n"
+            f"В честь вашего праздника мы начислили вам {bonus_amount} бонусов на услуги клиники.\n"
+            "Будем рады видеть вас! 💫\n\n"
+            "1 бонус = 1 рубль."
+        ),
+        reply_markup=build_birthday_keyboard(),
+    )
