@@ -35,7 +35,7 @@ CONSENT_MESSAGE = (
     "(ФИО, номер телефона, дата рождения) для:\n"
     "• ведения базы пациентов\n"
     "• связи с вами\n"
-    "• отправки сервисных сообщений, включая поздравления и бонусы в день рождения."
+    "• отправки сервисных сообщений, включая поздравления и подарки в день рождения."
 )
 
 CONSENT_POLICY_TEXT = (
@@ -178,7 +178,7 @@ CHILD_SUBSCRIPTION_CONTACT_URL = (
 )
 
 
-BIRTHDAY_CONTACT_TEXT = "Здравствуйте! Хочу использовать бонусы ко дню рождения."
+BIRTHDAY_CONTACT_TEXT = "Здравствуйте! Хочу использовать подарочный сертификат ко дню рождения."
 BIRTHDAY_USE_BONUSES_URL = f"https://t.me/{_ADMIN_USERNAME}?text={quote(BIRTHDAY_CONTACT_TEXT)}"
 
 
@@ -267,7 +267,7 @@ def build_flash_contact_keyboard() -> InlineKeyboardMarkup:
 
 def build_birthday_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🎁 Использовать бонусы", url=BIRTHDAY_USE_BONUSES_URL)]]
+        [[InlineKeyboardButton("🎁 Использовать сертификат", url=BIRTHDAY_USE_BONUSES_URL)]]
     )
 
 
@@ -372,11 +372,13 @@ async def send_birthday_message(bot, chat_id: int, bonus_amount: int) -> None:
     await bot.send_message(
         chat_id=chat_id,
         text=(
-            "Клиника «ГОЛДЕН ДЕНТ» поздравляет вас с днём рождения! 🌺\n"
-            "Желаем крепкого здоровья и как можно больше красивых улыбок.\n\n"
-            f"В честь вашего праздника мы начислили вам {bonus_amount} бонусов на услуги клиники.\n"
-            "Будем рады видеть вас! 💫\n\n"
-            "1 бонус = 1 рубль."
+            "Клиника «ГОЛДЕН ДЕНТ» поздравляет вас с днём рождения!\n"
+            "Желаем крепкого здоровья и счастливых улыбок.\n\n"
+            "В честь вашего праздника мы подготовили для вас подарок —\n"
+            f"подарочный сертификат на {bonus_amount} рублей на услуги клиники.\n"
+            "<i>подробности у администратора</i>\n\n"
+            "Будем рады видеть вас!"
         ),
+        parse_mode="HTML",
         reply_markup=build_birthday_keyboard(),
     )

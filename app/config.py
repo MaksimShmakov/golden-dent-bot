@@ -23,6 +23,6 @@ class Settings(BaseSettings):
     daily_reminder_minute: int = 0
     consent_policy_url: str | None = None
     consent_rules_url: str | None = None
-    birthday_bonus_amount: int = 3000
+    birthday_bonus_amount: int = 1000
 
     data_dir: str = "/data"

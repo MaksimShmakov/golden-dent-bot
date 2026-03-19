@@ -120,8 +120,8 @@ def test_birthday_message_log_is_idempotent(tmp_path):
     store = SQLiteStateStore(str(tmp_path))
     now = datetime(2026, 3, 17, 9, 0, 0)
 
-    assert store.mark_birthday_message_sent(42, "2026-03-17", 3000, now) is True
-    assert store.mark_birthday_message_sent(42, "2026-03-17", 3000, now) is False
+    assert store.mark_birthday_message_sent(42, "2026-03-17", 1000, now) is True
+    assert store.mark_birthday_message_sent(42, "2026-03-17", 1000, now) is False
     assert store.has_birthday_message_for_day(42, "2026-03-17") is True
 
 
