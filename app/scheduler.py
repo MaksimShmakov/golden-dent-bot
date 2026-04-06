@@ -18,6 +18,7 @@ from app.storage import ClientProfile, SQLiteStateStore
 logger = logging.getLogger("golden-dent")
 _ADMIN_USERNAME = "GoldenDentNSK"
 _FAILED_EXAMPLES_LIMIT = 5
+SAME_DAY_CATCHUP_GRACE_SECONDS = 15 * 60 * 60
 
 
 def build_scheduler(data_dir: str, tz: str) -> AsyncIOScheduler:
@@ -36,13 +37,25 @@ def schedule_daily_messages(
     minute: int,
     store: SQLiteStateStore,
 ) -> None:
-    trigger = CronTrigger(hour=hour, minute=minute, timezone=ZoneInfo(tz))
-    scheduler.add_job(
+    zone = ZoneInfo(tz)
+    trigger = CronTrigger(hour=hour, minute=minute, timezone=zone)
+    next_run_time = trigger.get_next_fire_time(None, datetime.now(zone))
+    job = scheduler.add_job(
         send_daily_messages,
         trigger=trigger,
         id="daily_messages",
         replace_existing=True,
         args=[bot, sheets, appointments_tab, undelivered_tab, tz, store],
+        misfire_grace_time=SAME_DAY_CATCHUP_GRACE_SECONDS,
+        coalesce=True,
+        max_instances=1,
+    )
+    logger.info(
+        "Scheduled job id=%s tz=%s next_run_time=%s misfire_grace_time=%s",
+        job.id,
+        tz,
+        next_run_time,
+        job.misfire_grace_time,
     )
 
 
@@ -57,13 +70,25 @@ def schedule_birthday_messages(
     store: SQLiteStateStore,
     bonus_amount: int,
 ) -> None:
-    trigger = CronTrigger(hour=hour, minute=minute, timezone=ZoneInfo(tz))
-    scheduler.add_job(
+    zone = ZoneInfo(tz)
+    trigger = CronTrigger(hour=hour, minute=minute, timezone=zone)
+    next_run_time = trigger.get_next_fire_time(None, datetime.now(zone))
+    job = scheduler.add_job(
         send_birthday_messages,
         trigger=trigger,
         id="birthday_messages",
         replace_existing=True,
         args=[bot, sheets, undelivered_tab, tz, store, bonus_amount],
+        misfire_grace_time=SAME_DAY_CATCHUP_GRACE_SECONDS,
+        coalesce=True,
+        max_instances=1,
+    )
+    logger.info(
+        "Scheduled job id=%s tz=%s next_run_time=%s misfire_grace_time=%s",
+        job.id,
+        tz,
+        next_run_time,
+        job.misfire_grace_time,
     )
 
 
@@ -176,6 +201,16 @@ async def send_daily_messages(
             )
             _apply_delivery_stats(stats, entry.username, sent, failure_reason)
 
+    logger.info(
+        "Daily messages completed: sent=%s failed=%s appointment_candidates=%s "
+        "surgeon_candidates=%s periodic_candidates=%s failed_examples=%s",
+        stats["sent"],
+        stats["failed"],
+        stats["appointment_candidates"],
+        stats["surgeon_candidates"],
+        stats["periodic_candidates"],
+        stats["failed_examples"],
+    )
     return stats
 
 
@@ -247,6 +282,15 @@ async def send_birthday_messages(
                 reason=str(exc),
             )
 
+    logger.info(
+        "Birthday messages completed: sent=%s failed=%s candidates=%s "
+        "already_sent=%s failed_examples=%s",
+        stats["sent"],
+        stats["failed"],
+        stats["candidates"],
+        stats["already_sent"],
+        stats["failed_examples"],
+    )
     return stats
 
 

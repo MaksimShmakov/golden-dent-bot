@@ -7,7 +7,13 @@ from zoneinfo import ZoneInfo
 
 from dateutil.relativedelta import relativedelta
 
-from app.scheduler import _build_reschedule_url, send_daily_messages
+from app.scheduler import (
+    _build_reschedule_url,
+    build_scheduler,
+    schedule_birthday_messages,
+    schedule_daily_messages,
+    send_daily_messages,
+)
 from app.sheets import SheetEntry
 
 
@@ -117,6 +123,50 @@ def test_send_daily_messages_defaults_to_tomorrow():
     assert sheets.status_updates[0][1] == 3
     assert sheets.status_updates[0][2]
     assert sheets.status_updates[0][3] == "C"
+
+
+def test_schedule_daily_messages_sets_same_day_catchup_job_defaults():
+    scheduler = build_scheduler("/tmp", "Asia/Novosibirsk")
+
+    schedule_daily_messages(
+        scheduler,
+        object(),
+        object(),
+        "appointments",
+        "undelivered",
+        "Asia/Novosibirsk",
+        9,
+        0,
+        object(),
+    )
+
+    job = scheduler.get_job("daily_messages")
+    assert job is not None
+    assert job.misfire_grace_time == 15 * 60 * 60
+    assert job.coalesce is True
+    assert job.max_instances == 1
+
+
+def test_schedule_birthday_messages_sets_same_day_catchup_job_defaults():
+    scheduler = build_scheduler("/tmp", "Asia/Novosibirsk")
+
+    schedule_birthday_messages(
+        scheduler,
+        object(),
+        object(),
+        "undelivered",
+        "Asia/Novosibirsk",
+        9,
+        0,
+        object(),
+        1000,
+    )
+
+    job = scheduler.get_job("birthday_messages")
+    assert job is not None
+    assert job.misfire_grace_time == 15 * 60 * 60
+    assert job.coalesce is True
+    assert job.max_instances == 1
 
 
 def test_send_daily_messages_can_target_today():
