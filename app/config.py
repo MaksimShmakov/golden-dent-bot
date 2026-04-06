@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     google_admins_tab: str = "Список админов"
 
     tz: str = "Asia/Novosibirsk"
-    daily_reminder_hour: int = 9
+    daily_reminder_hour: int = 12
     daily_reminder_minute: int = 0
     consent_policy_url: str | None = None
     consent_rules_url: str | None = None
