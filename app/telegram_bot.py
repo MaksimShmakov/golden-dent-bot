@@ -40,6 +40,7 @@ from app.messages import (
     build_implant_contact_keyboard,
     build_special_offers_keyboard,
     build_ultrasound_contact_keyboard,
+    get_consent_document_path,
     send_about_message,
     send_consent_message,
     send_info_start_message,
@@ -121,7 +122,7 @@ def build_application(
     )
     application.add_handler(CallbackQueryHandler(consent_accept_cb, pattern="^consent_accept$"))
     application.add_handler(
-        CallbackQueryHandler(consent_doc_cb, pattern=r"^consent_doc:(policy|rules)$")
+        CallbackQueryHandler(consent_doc_cb, pattern=r"^consent_doc:(policy|rules|local)$")
     )
     application.add_handler(CallbackQueryHandler(go_start_cb, pattern="^go_start$"))
     application.add_handler(CallbackQueryHandler(about_us_cb, pattern="^about_us$"))
@@ -2047,14 +2048,35 @@ async def consent_accept_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await _continue_onboarding(update, context)
 
 
+async def _send_local_consent_document(query) -> bool:
+    document_path = get_consent_document_path()
+    if not document_path.exists() or not query.message:
+        return False
+
+    with document_path.open("rb") as document:
+        await query.message.reply_document(
+            document=document,
+        )
+    return True
+
+
 async def consent_doc_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query or not query.message:
         return
     await query.answer()
     doc_key = (query.data or "").split(":", maxsplit=1)[1]
-    if doc_key == "policy":
+    if doc_key == "local":
+        if await _send_local_consent_document(query):
+            return
         await query.message.reply_text(CONSENT_POLICY_TEXT)
+        return
+    if doc_key == "policy":
+        if await _send_local_consent_document(query):
+            return
+        await query.message.reply_text(CONSENT_POLICY_TEXT)
+        return
+    if await _send_local_consent_document(query):
         return
     await query.message.reply_text(CONSENT_RULES_TEXT)
 

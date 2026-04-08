@@ -621,6 +621,14 @@ class SQLiteStateStore:
                 (normalized,),
             )
             row = cur.fetchone()
+            if row:
+                return row[0]
+
+            cur = conn.execute(
+                "SELECT user_id FROM client_map WHERE username=?",
+                (normalized,),
+            )
+            row = cur.fetchone()
         return row[0] if row else None
 
     def ensure_special_offers_defaults(

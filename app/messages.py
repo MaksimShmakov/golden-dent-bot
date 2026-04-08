@@ -137,6 +137,7 @@ _ADMIN_USERNAME = "GoldenDentNSK"
 _LOGO_PATH = Path(__file__).resolve().parent.parent / "logo-gd.jpg"
 _SPECIAL_SUG_PATH = Path(__file__).resolve().parent.parent / "special-sug.jpg"
 _ABOUT_PHOTO_PATH = Path(__file__).resolve().parent.parent / "ew-photo.jpg"
+_CONSENT_DOCUMENT_PATH = Path(__file__).resolve().parent.parent / "Документ.pdf"
 _SUBSCRIPTION_URL = "https://голдендент.рф/оплата-абонемента"
 
 CONTACT_TEXT = "Здравствуйте! Я перешел от телеграмм-бота."
@@ -187,19 +188,58 @@ def build_consent_keyboard(
     rules_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton("✔ Продолжить", callback_data="consent_accept")]]
+    if _CONSENT_DOCUMENT_PATH.exists():
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442 "
+                    "\u043e \u0441\u043e\u0433\u043b\u0430\u0441\u0438\u0438",
+                    callback_data="consent_doc:local",
+                )
+            ]
+        )
+        return InlineKeyboardMarkup(rows)
     if policy_url:
-        rows.append([InlineKeyboardButton("Политика обработки персональных данных", url=policy_url)])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "Политика обработки персональных данных",
+                    url=policy_url,
+                )
+            ]
+        )
     else:
         rows.append(
-            [InlineKeyboardButton("Политика обработки персональных данных", callback_data="consent_doc:policy")]
+            [
+                InlineKeyboardButton(
+                    "Политика обработки персональных данных",
+                    callback_data="consent_doc:policy",
+                )
+            ]
         )
     if rules_url:
-        rows.append([InlineKeyboardButton("Правила использования чат-бота", url=rules_url)])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "Правила использования чат-бота",
+                    url=rules_url,
+                )
+            ]
+        )
     else:
         rows.append(
-            [InlineKeyboardButton("Правила использования чат-бота", callback_data="consent_doc:rules")]
+            [
+                InlineKeyboardButton(
+                    "Правила использования чат-бота",
+                    callback_data="consent_doc:rules",
+                )
+            ]
         )
     return InlineKeyboardMarkup(rows)
+
+
+def get_consent_document_path() -> Path:
+    return _CONSENT_DOCUMENT_PATH
 
 
 def build_main_keyboard() -> InlineKeyboardMarkup:

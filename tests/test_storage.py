@@ -29,6 +29,14 @@ def test_activation_is_marked_once(tmp_path):
     assert store.mark_activated(42, now) is False
 
 
+def test_get_chat_id_falls_back_to_client_profile_user_id(tmp_path):
+    store = SQLiteStateStore(str(tmp_path))
+    now = datetime(2026, 2, 11, 10, 0, 0)
+
+    assert store.upsert_client(42, "User42", "", "", now) is True
+    assert store.get_chat_id("@user42") == 42
+
+
 def test_client_profile_contains_full_name_phone_birth_date_and_consent(tmp_path):
     store = SQLiteStateStore(str(tmp_path))
     now = datetime(2026, 2, 11, 10, 0, 0)

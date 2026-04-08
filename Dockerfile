@@ -12,6 +12,7 @@ COPY app /app/app
 COPY logo-gd.jpg /app/logo-gd.jpg
 COPY special-sug.jpg /app/special-sug.jpg
 COPY ew-photo.jpg /app/ew-photo.jpg
+COPY Документ.pdf /app/Документ.pdf
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
