@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
@@ -9,16 +10,18 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dateutil.relativedelta import relativedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram.error import TelegramError, TimedOut
 
 from app.messages import send_birthday_message, send_main_message
 from app.sheets import SheetsClient
-from app.storage import ClientProfile, SQLiteStateStore
+from app.storage import SQLiteStateStore
 
 logger = logging.getLogger("golden-dent")
 _ADMIN_USERNAME = "GoldenDentNSK"
 _FAILED_EXAMPLES_LIMIT = 5
 SAME_DAY_CATCHUP_GRACE_SECONDS = 15 * 60 * 60
+TIMED_OUT_RETRY_ATTEMPTS = 3
+TIMED_OUT_RETRY_DELAY_SECONDS = 2
 
 
 def build_scheduler(data_dir: str, tz: str) -> AsyncIOScheduler:
@@ -265,8 +268,21 @@ async def send_birthday_messages(
             continue
 
         try:
-            await send_birthday_message(bot, target, bonus_amount=bonus_amount)
-            store.mark_birthday_message_sent(client.user_id, sent_on, bonus_amount, datetime.now(zone))
+            await _run_with_timed_out_retry(
+                lambda target=target: send_birthday_message(
+                    bot,
+                    target,
+                    bonus_amount=bonus_amount,
+                ),
+                target_label=target_label,
+                action_name="birthday message",
+            )
+            store.mark_birthday_message_sent(
+                client.user_id,
+                sent_on,
+                bonus_amount,
+                datetime.now(zone),
+            )
             stats["sent"] = int(stats["sent"]) + 1
         except TelegramError as exc:
             logger.warning("Failed to send birthday message to %s: %s", target_label, exc)
@@ -346,7 +362,11 @@ async def _send_appointment_message(
         return False, failure_reason
 
     try:
-        await bot.send_message(chat_id=target, text=text, reply_markup=keyboard)
+        await _run_with_timed_out_retry(
+            lambda: bot.send_message(chat_id=target, text=text, reply_markup=keyboard),
+            target_label=username,
+            action_name=kind,
+        )
         sheets.update_appointment_status(
             appointments_tab,
             row_number,
@@ -394,7 +414,11 @@ async def _send_periodic_message(
         return False, failure_reason
 
     try:
-        await send_main_message(bot, target, reminder_months=reminder_months)
+        await _run_with_timed_out_retry(
+            lambda: send_main_message(bot, target, reminder_months=reminder_months),
+            target_label=username,
+            action_name=f"{reminder_months}m reminder",
+        )
         sheets.update_appointment_status(
             appointments_tab,
             row_number,
@@ -420,6 +444,29 @@ async def _send_periodic_message(
             reason=str(exc),
         )
         return False, str(exc)
+
+
+async def _run_with_timed_out_retry(
+    action,
+    *,
+    target_label: str,
+    action_name: str,
+):
+    for attempt in range(1, TIMED_OUT_RETRY_ATTEMPTS + 1):
+        try:
+            return await action()
+        except TimedOut:
+            if attempt >= TIMED_OUT_RETRY_ATTEMPTS:
+                raise
+            logger.warning(
+                "Timed out while sending %s to %s (attempt %s/%s), retrying in %ss",
+                action_name,
+                target_label,
+                attempt,
+                TIMED_OUT_RETRY_ATTEMPTS,
+                TIMED_OUT_RETRY_DELAY_SECONDS,
+            )
+            await asyncio.sleep(TIMED_OUT_RETRY_DELAY_SECONDS)
 
 
 def _resolve_private_target(

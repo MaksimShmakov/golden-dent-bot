@@ -6,7 +6,9 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from dateutil.relativedelta import relativedelta
+from telegram.error import TimedOut
 
+from app import scheduler as scheduler_module
 from app.scheduler import (
     _build_reschedule_url,
     build_scheduler,
@@ -23,6 +25,18 @@ class FakeBot:
 
     async def send_message(self, chat_id, text: str, reply_markup=None) -> None:  # noqa: ANN001
         self.sent_messages.append((chat_id, text))
+
+
+class FakeFlakyBot(FakeBot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def send_message(self, chat_id, text: str, reply_markup=None) -> None:  # noqa: ANN001
+        self.calls += 1
+        if self.calls == 1:
+            raise TimedOut("Timed out")
+        await super().send_message(chat_id, text, reply_markup=reply_markup)
 
 
 class FakeSheets:
@@ -277,6 +291,36 @@ def test_send_daily_messages_uses_periodic_column_for_three_months():
     assert len(bot.sent_messages) == 1
     assert "3" in bot.sent_messages[0][1]
     assert store.reminder_context == (10001, 7, "G")
+
+
+def test_send_daily_messages_retries_timed_out_once(monkeypatch):
+    async def fake_sleep(_seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", fake_sleep)
+
+    zone = ZoneInfo("Asia/Novosibirsk")
+    today = datetime.now(zone).date()
+    sheets = FakeSheets([_entry_for_day(today, 1, 3)])
+    bot = FakeFlakyBot()
+    store = FakeStore()
+
+    stats = asyncio.run(
+        send_daily_messages(
+            bot,
+            sheets,
+            "appointments",
+            "undelivered",
+            "Asia/Novosibirsk",
+            store,
+        )
+    )
+
+    assert stats["sent"] == 1
+    assert stats["failed"] == 0
+    assert bot.calls == 2
+    assert len(bot.sent_messages) == 1
+    assert sheets.status_updates[0][1] == 3
 
 
 def test_build_reschedule_url_contains_date_and_time():
