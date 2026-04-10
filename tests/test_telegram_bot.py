@@ -1,8 +1,11 @@
+from app.storage import SQLiteStateStore
 from app.telegram_bot import (
     _parse_broadcast_buttons,
     _parse_broadcast_usernames,
     _parse_full_name_segments,
     _parse_test_daily_days_ahead,
+    _resolve_broadcast_target,
+    _split_telegram_text,
 )
 
 
@@ -52,3 +55,22 @@ def test_parse_broadcast_buttons_validates_format_and_url():
     buttons, error = _parse_broadcast_buttons("Без ссылки | not-a-url")
     assert buttons == []
     assert error is not None
+
+
+def test_resolve_broadcast_target_requires_known_private_chat(tmp_path):
+    store = SQLiteStateStore(str(tmp_path))
+
+    target, reason = _resolve_broadcast_target(store, "@missinguser")
+
+    assert target is None
+    assert reason is not None
+
+
+def test_split_telegram_text_preserves_content():
+    text = ("A" * 3000) + "\n\n" + ("B" * 3000)
+
+    chunks = _split_telegram_text(text, limit=4096)
+
+    assert len(chunks) == 2
+    assert chunks[0] == "A" * 3000
+    assert chunks[1] == "B" * 3000

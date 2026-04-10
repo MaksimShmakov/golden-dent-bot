@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -7,6 +8,8 @@ from datetime import datetime
 import gspread
 
 from app.storage import ClientProfile
+
+logger = logging.getLogger("golden-dent")
 
 
 @dataclass
@@ -220,10 +223,20 @@ def _build_appointment_entry(row_number: int, row: list[str]) -> SheetEntry | No
     date_raw = _cell_value(row, 0)
     dt = _parse_datetime(date_raw) if date_raw else None
     if not dt:
+        if _looks_like_sheet_datetime(date_raw):
+            logger.warning(
+                "Skip appointment row %s: unsupported date format %r",
+                row_number,
+                date_raw,
+            )
         return None
 
     username = _cell_value(row, 1)
     if not username:
+        logger.warning(
+            "Skip appointment row %s: date is set but tg_username is empty",
+            row_number,
+        )
         return None
 
     return SheetEntry(
@@ -251,10 +264,22 @@ def _build_periodic_entry(
     date_raw = _cell_value(row, date_index)
     dt = _parse_datetime(date_raw) if date_raw else None
     if not dt:
+        if _looks_like_sheet_datetime(date_raw):
+            logger.warning(
+                "Skip periodic row %s (%s): unsupported date format %r",
+                row_number,
+                status_column,
+                date_raw,
+            )
         return None
 
     username = _cell_value(row, username_index)
     if not username:
+        logger.warning(
+            "Skip periodic row %s (%s): date is set but tg_username is empty",
+            row_number,
+            status_column,
+        )
         return None
 
     return SheetEntry(
@@ -324,6 +349,15 @@ def _parse_datetime(value: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _looks_like_sheet_datetime(value: str) -> bool:
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return False
+    if cleaned in {"date", "дата"}:
+        return False
+    return any(ch.isdigit() for ch in cleaned)
 
 
 def _parse_reminder_months(value: str) -> int:

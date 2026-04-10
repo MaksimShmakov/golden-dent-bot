@@ -499,6 +499,31 @@ class SQLiteStateStore:
             rows = cur.fetchall()
         return [row[0] for row in rows]
 
+    def list_client_delivery_targets(self) -> list[str]:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT user_id, username
+                FROM client_map
+                ORDER BY
+                    CASE WHEN username = '' THEN 1 ELSE 0 END,
+                    username,
+                    user_id
+                """
+            )
+            rows = cur.fetchall()
+
+        seen: set[str] = set()
+        targets: list[str] = []
+        for user_id, username in rows:
+            normalized_username = _normalize_username(username)
+            target = normalized_username or f"id:{int(user_id)}"
+            if target in seen:
+                continue
+            seen.add(target)
+            targets.append(target)
+        return targets
+
     def list_clients(self) -> list[ClientProfile]:
         with self._connect() as conn:
             cur = conn.execute(

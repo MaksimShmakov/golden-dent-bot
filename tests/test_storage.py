@@ -21,6 +21,16 @@ def test_client_usernames_are_tracked_as_latest(tmp_path):
     assert store.remove_client(1) is False
 
 
+def test_client_delivery_targets_include_user_id_when_username_missing(tmp_path):
+    store = SQLiteStateStore(str(tmp_path))
+    now = datetime(2026, 2, 11, 10, 0, 0)
+
+    assert store.upsert_client(1, "FirstUser", "", "", now) is True
+    assert store.upsert_client(2, None, "", "", now) is True
+
+    assert store.list_client_delivery_targets() == ["@firstuser", "id:2"]
+
+
 def test_activation_is_marked_once(tmp_path):
     store = SQLiteStateStore(str(tmp_path))
     now = datetime(2026, 2, 11, 10, 0, 0)

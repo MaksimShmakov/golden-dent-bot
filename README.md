@@ -81,7 +81,7 @@
 Лист **"Не доставлено"**:
 - A: дата и время
 - B: tg_username
-- C: тип (`appointment`, `3m`, `6m` или `birthday`)
+- C: тип (`appointment`, `3m`, `6m`, `birthday` или `broadcast`)
 - D: причина
 
 Лист **"БД - клиенты"**:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
@@ -14,7 +15,7 @@ from telegram import (
     ReplyKeyboardRemove,
     Update,
 )
-from telegram.error import TelegramError
+from telegram.error import TelegramError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -48,7 +49,7 @@ from app.messages import (
     send_special_offers_message,
     send_start_message,
 )
-from app.scheduler import send_birthday_messages, send_daily_messages
+from app.scheduler import flush_undelivered_events, send_birthday_messages, send_daily_messages
 from app.sheets import SheetsClient
 from app.storage import OfferTemplate, SQLiteStateStore
 
@@ -70,6 +71,8 @@ _OFFERS_ADMIN_DRAFT_KEY = "offers_admin_draft"
 _ADMINS_CACHE_KEY = "admin_usernames_cache"
 _ADMINS_CACHE_AT_KEY = "admin_usernames_cache_at"
 _ADMINS_CACHE_TTL = timedelta(seconds=60)
+_BROADCAST_TIMED_OUT_RETRY_ATTEMPTS = 3
+_BROADCAST_TIMED_OUT_RETRY_DELAY_SECONDS = 2
 
 
 def build_application(
@@ -1656,7 +1659,7 @@ async def _handle_broadcast_text(
     if state == "recipients":
         store: SQLiteStateStore = context.application.bot_data["store"]
         if lowered in {"all", "все", "база"}:
-            usernames = store.list_client_usernames()
+            usernames = store.list_client_delivery_targets()
         else:
             usernames = _parse_broadcast_usernames(text)
 
@@ -1683,6 +1686,7 @@ async def _handle_broadcast_text(
             context.bot,
             update.effective_chat.id,
             draft,
+            target_label="preview",
         )
         return True
 
@@ -1772,18 +1776,102 @@ def _build_broadcast_keyboard(buttons: list[tuple[str, str]]):
     return InlineKeyboardMarkup(rows)
 
 
-def _resolve_broadcast_target(store: SQLiteStateStore, username: str):
+def _resolve_broadcast_target(
+    store: SQLiteStateStore,
+    username: str,
+) -> tuple[int | None, str | None]:
     chat_id = store.get_chat_id(username)
     if chat_id:
-        return chat_id
+        return chat_id, None
     if username.startswith("id:") and username[3:].isdigit():
-        return int(username[3:])
+        return int(username[3:]), None
     if username.isdigit():
-        return int(username)
-    return username if username.startswith("@") else f"@{username}"
+        return int(username), None
+    return None, "user has not started the bot or username does not match the stored chat"
 
 
-async def _send_custom_broadcast_payload(bot, target, draft: dict) -> None:
+def _split_telegram_text(text: str, limit: int = 4096) -> list[str]:
+    remaining = text.strip()
+    if not remaining:
+        return []
+
+    chunks: list[str] = []
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n\n", 0, limit + 1)
+        if split_at == -1:
+            split_at = remaining.rfind("\n", 0, limit + 1)
+        if split_at == -1:
+            split_at = remaining.rfind(" ", 0, limit + 1)
+        if split_at <= 0 or split_at < limit // 2:
+            split_at = limit
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+async def _retry_custom_broadcast_call(action, *, target_label: str, action_name: str):
+    for attempt in range(1, _BROADCAST_TIMED_OUT_RETRY_ATTEMPTS + 1):
+        try:
+            return await action()
+        except TimedOut:
+            if attempt >= _BROADCAST_TIMED_OUT_RETRY_ATTEMPTS:
+                raise
+            logger.warning(
+                "Timed out while sending %s to %s (attempt %s/%s), retrying in %ss",
+                action_name,
+                target_label,
+                attempt,
+                _BROADCAST_TIMED_OUT_RETRY_ATTEMPTS,
+                _BROADCAST_TIMED_OUT_RETRY_DELAY_SECONDS,
+            )
+            await asyncio.sleep(_BROADCAST_TIMED_OUT_RETRY_DELAY_SECONDS)
+
+
+async def _send_broadcast_message_with_retry(
+    bot,
+    *,
+    target: int,
+    target_label: str,
+    text: str,
+    reply_markup=None,
+) -> None:
+    await _retry_custom_broadcast_call(
+        lambda: bot.send_message(chat_id=target, text=text, reply_markup=reply_markup),
+        target_label=target_label,
+        action_name="broadcast message",
+    )
+
+
+async def _send_broadcast_photo_with_retry(
+    bot,
+    *,
+    target: int,
+    target_label: str,
+    photo,
+    caption: str | None = None,
+    reply_markup=None,
+) -> None:
+    await _retry_custom_broadcast_call(
+        lambda: bot.send_photo(
+            chat_id=target,
+            photo=photo,
+            caption=caption,
+            reply_markup=reply_markup,
+        ),
+        target_label=target_label,
+        action_name="broadcast photo",
+    )
+
+
+async def _send_custom_broadcast_payload(
+    bot,
+    target: int,
+    draft: dict,
+    *,
+    target_label: str,
+) -> None:
     text = str(draft.get("text", "")).strip()
     if not text:
         return
@@ -1792,17 +1880,42 @@ async def _send_custom_broadcast_payload(bot, target, draft: dict) -> None:
     photo_file_id = draft.get("photo_file_id")
     if photo_file_id:
         if len(text) <= 1024:
-            await bot.send_photo(
-                chat_id=target,
+            await _send_broadcast_photo_with_retry(
+                bot,
+                target=target,
+                target_label=target_label,
                 photo=photo_file_id,
                 caption=text,
                 reply_markup=keyboard,
             )
             return
-        await bot.send_photo(chat_id=target, photo=photo_file_id)
-        await bot.send_message(chat_id=target, text=text, reply_markup=keyboard)
+        await _send_broadcast_photo_with_retry(
+            bot,
+            target=target,
+            target_label=target_label,
+            photo=photo_file_id,
+        )
+        text_chunks = _split_telegram_text(text)
+        for index, chunk in enumerate(text_chunks, start=1):
+            markup = keyboard if index == len(text_chunks) else None
+            await _send_broadcast_message_with_retry(
+                bot,
+                target=target,
+                target_label=target_label,
+                text=chunk,
+                reply_markup=markup,
+            )
         return
-    await bot.send_message(chat_id=target, text=text, reply_markup=keyboard)
+    text_chunks = _split_telegram_text(text)
+    for index, chunk in enumerate(text_chunks, start=1):
+        markup = keyboard if index == len(text_chunks) else None
+        await _send_broadcast_message_with_retry(
+            bot,
+            target=target,
+            target_label=target_label,
+            text=chunk,
+            reply_markup=markup,
+        )
 
 
 async def _run_custom_broadcast(
@@ -1823,18 +1936,31 @@ async def _run_custom_broadcast(
     failed = 0
     failed_lines: list[str] = []
     for username in usernames:
-        target = _resolve_broadcast_target(store, username)
+        target, failure_reason = _resolve_broadcast_target(store, username)
+        if target is None:
+            failed += 1
+            _log_custom_broadcast_failure(context, username, failure_reason or "missing chat id")
+            if len(failed_lines) < 10:
+                failed_lines.append(f"{username}: {failure_reason or 'missing chat id'}")
+            continue
         try:
-            await _send_custom_broadcast_payload(context.bot, target, draft)
+            await _send_custom_broadcast_payload(
+                context.bot,
+                target,
+                draft,
+                target_label=username,
+            )
             sent += 1
         except TelegramError as exc:
             failed += 1
+            _log_custom_broadcast_failure(context, username, str(exc))
             if len(failed_lines) < 10:
                 failed_lines.append(f"{username}: {exc}")
         except Exception as exc:  # noqa: BLE001
             failed += 1
+            _log_custom_broadcast_failure(context, username, str(exc))
             if len(failed_lines) < 10:
-                failed_lines.append(f"{username}: {type(exc).__name__}")
+                failed_lines.append(f"{username}: {exc}")
 
     lines = [
         "Кастомная рассылка завершена.",
@@ -1845,6 +1971,29 @@ async def _run_custom_broadcast(
         lines.append("Первые ошибки:")
         lines.extend(failed_lines)
     await update.effective_chat.send_message("\n".join(lines))
+
+
+def _log_custom_broadcast_failure(
+    context: ContextTypes.DEFAULT_TYPE,
+    username: str,
+    reason: str,
+) -> None:
+    store: SQLiteStateStore = context.application.bot_data["store"]
+    sheets: SheetsClient = context.application.bot_data["sheets"]
+    config = context.application.bot_data["config"]
+    zone = ZoneInfo(context.application.bot_data["tz"])
+    store.add_undelivered_event(
+        datetime.now(zone),
+        username,
+        "broadcast",
+        reason,
+    )
+    flush_undelivered_events(
+        sheets,
+        config.google_undelivered_tab,
+        context.application.bot_data["tz"],
+        store,
+    )
 
 
 def _sync_clients_sheet(context: ContextTypes.DEFAULT_TYPE) -> None:
