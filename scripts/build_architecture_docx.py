@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +51,21 @@ def set_base_style(document: Document) -> None:
     style = document.styles["Normal"]
     style.font.name = "Calibri"
     style.font.size = Pt(11)
+
+    # Заголовок документа: чёрный, по центру, без горизонтальной линии.
+    title = document.styles["Title"]
+    title.font.color.rgb = RGBColor(0, 0, 0)
+    title.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    pPr = title.element.get_or_add_pPr()
+    for pbdr in pPr.findall(qn("w:pBdr")):
+        pPr.remove(pbdr)
+
+    # Заголовки разделов: чёрный жирный, без синей подсветки.
+    for level in range(1, 5):
+        heading = document.styles[f"Heading {level}"]
+        heading.font.color.rgb = RGBColor(0, 0, 0)
+        heading.font.bold = True
+
     for section in document.sections:
         section.top_margin = Cm(2)
         section.bottom_margin = Cm(2)
