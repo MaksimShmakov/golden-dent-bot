@@ -1,22 +1,25 @@
-"""Конвертер ARCHITECTURE.md -> ARCHITECTURE.docx.
+"""Конвертер Markdown -> .docx для документов проекта.
 
-Поддерживает ограниченное подмножество Markdown, которое реально
-используется в ARCHITECTURE.md: заголовки #/##/###, списки "- ",
-нумерованные списки "N.", таблицы в формате GFM, жирный **текст**,
-горизонтальные разделители "---".
+По умолчанию собирает ARCHITECTURE.md -> ARCHITECTURE.docx. Можно
+передать произвольный путь к .md-файлу аргументом командной строки;
+итоговый .docx будет сохранён рядом с тем же базовым именем.
+
+Поддерживает ограниченное подмножество Markdown: заголовки #/##/###/####,
+маркированные списки "- ", нумерованные списки "N.", таблицы в формате
+GFM, жирный **текст**, инлайн `code`, горизонтальные разделители "---".
 """
 
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 from docx import Document
 from docx.shared import Cm, Pt, RGBColor
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "ARCHITECTURE.md"
-TARGET = ROOT / "ARCHITECTURE.docx"
+DEFAULT_SOURCE = ROOT / "ARCHITECTURE.md"
 
 BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 INLINE_CODE_RE = re.compile(r"`([^`]+)`")
@@ -145,13 +148,16 @@ def convert(md_text: str, document: Document) -> None:
         i += 1
 
 
-def main() -> None:
-    md_text = SOURCE.read_text(encoding="utf-8")
+def main(argv: list[str] | None = None) -> None:
+    args = argv if argv is not None else sys.argv[1:]
+    source = Path(args[0]).resolve() if args else DEFAULT_SOURCE
+    target = source.with_suffix(".docx")
+    md_text = source.read_text(encoding="utf-8")
     document = Document()
     set_base_style(document)
     convert(md_text, document)
-    document.save(TARGET)
-    print(f"Saved: {TARGET}")
+    document.save(target)
+    print(f"Saved: {target}")
 
 
 if __name__ == "__main__":
